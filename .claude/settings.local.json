@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:docs.stagehand.dev)",
+      "WebFetch(domain:github.com)",
+      "WebSearch",
+      "Bash(npm run:*)",
+      "Bash(cd \"C:/Users/Pranav Gupta/x-posting-agent\" && npx tsx test-stagehand.ts)",
+      "Bash(cd \"/c/Users/Pranav Gupta/x-posting-agent\" && npx tsc --noEmit 2>&1)",
+      "Bash(cd \"C:\\\\Users\\\\Pranav Gupta\\\\x-posting-agent\" && node --import=tsx src/index.ts post \"https://www.kenresearch.com/united-arab-emirates-offshore-rental-equipment-market\" Naman280771)",
+      "Bash(cd \"C:\\\\Users\\\\Pranav Gupta\\\\x-posting-agent\" && node --import=tsx --check src/agents/scheduler.ts 2>&1)",
+      "Bash(cd \"C:\\\\Users\\\\Pranav Gupta\\\\x-posting-agent\" && node --import=tsx --check src/agents/scheduler.ts 2>&1 && node --import=tsx --check src/agents/socialOrchestrator.ts 2>&1)",
+      "Bash(cat \"C:\\\\Users\\\\Pranav Gupta\\\\x-posting-agent\\\\.accounts\\\\accounts.json\" | node -e \"const d=require\\('fs'\\).readFileSync\\('/dev/stdin','utf8'\\); const a=JSON.parse\\(d\\).find\\(x=>x.handle.toLowerCase\\(\\).includes\\('krishi'\\)\\); console.log\\(JSON.stringify\\({handle:a?.handle, username:a?.username, sessionDir:a?.sessionDir, active:a?.active}\\)\\)\")",
+      "Bash(find 'c:\\\\Users\\\\Pranav Gupta\\\\x-posting-agent' -name *.test.ts -o -name *.spec.ts)",
+      "Bash(node --import=tsx src/index.ts x-flow pranav 5)",
+      "Bash(node --import=tsx src/index.ts x-flow shrey 5)",
+      "Bash(node --import=tsx src/index.ts x-flow sanya 5)",
+      "Bash(node --import=tsx src/index.ts x-flow shivani 5)",
+      "Bash(node --import=tsx src/index.ts x-flow vijay 5)",
+      "Bash(node --import=tsx src/index.ts x-flow avdhesh 5)",
+      "Bash(node --import=tsx src/index.ts x-flow abhinav 5)",
+      "Bash(node --import=tsx src/index.ts run-batch 6)",
+      "Bash(npx tsc:*)"
+    ]
+  }
+}

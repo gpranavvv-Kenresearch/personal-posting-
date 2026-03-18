@@ -1,0 +1,10 @@
+node_modules/
+.env
+.sessions/
+li-sessions/
+.accounts/google-service-account.json
+.accounts/accounts.json
+.accounts/facebook-accounts.json
+.accounts/linkedin-accounts.json
+dist/
+*.log
