@@ -17,6 +17,10 @@ import {
   saveUnifiedLinkedInResult,
   saveUnifiedSeoData,
   getRowByIndex,
+  getUrlsDueForRecheck,
+  saveWeeklySerpRecheck,
+  getRowsWithoutFbUrl,
+  getRowsWithoutLiUrl,
   SheetRow,
 } from '../sheets/sheets.js';
 import { incrementCount, getCount } from '../config/accountTracker.js';
@@ -29,6 +33,26 @@ const CAPACITY = {
 };
 
 const STATE_FILE = '.sessions/coordinator-state.json';
+const BATCH_STATE_FILE = '.sessions/batch-state.json';
+
+interface BatchState {
+  facebook: { nextRowIndex: number; currentBatchSize: number; lastRunDate: string };
+  linkedin: { nextRowIndex: number; currentBatchSize: number; lastRunDate: string };
+}
+
+function getBatchState(): BatchState {
+  if (!fs.existsSync(BATCH_STATE_FILE)) {
+    return {
+      facebook: { nextRowIndex: 1, currentBatchSize: 15, lastRunDate: '' },
+      linkedin: { nextRowIndex: 1, currentBatchSize: 15, lastRunDate: '' },
+    };
+  }
+  return JSON.parse(fs.readFileSync(BATCH_STATE_FILE, 'utf8'));
+}
+
+function saveBatchState(state: BatchState): void {
+  fs.writeFileSync(BATCH_STATE_FILE, JSON.stringify(state, null, 2));
+}
 
 export interface CoordinatorState {
   date: string;
@@ -300,21 +324,57 @@ async function runLiBatch(state: CoordinatorState): Promise<void> {
 }
 
 /**
- * Get rows for FB posting (TODO: implement priority ordering)
+ * Get rows for FB posting (continuous picking - Feature 1)
+ * Picks rows sequentially: 1-15, then 16-30, etc. No daily reset.
  */
 async function getRowsForFb(limit: number): Promise<SheetRow[]> {
-  // TODO: Query sheet for rows where fbPostUrl is empty, ordered by priority
-  // For now return empty
-  return [];
+  const batchState = getBatchState();
+  const today = new Date().toISOString().split('T')[0];
+
+  // Reset nextRowIndex if it's a new day
+  if (batchState.facebook.lastRunDate !== today) {
+    // Don't reset - continue from where we left off
+    // This enables week-long continuous posting
+  }
+
+  const rows = await getRowsWithoutFbUrl(batchState.facebook.nextRowIndex, limit);
+
+  // Update next row index for next batch
+  if (rows.length > 0) {
+    batchState.facebook.nextRowIndex += rows.length;
+    batchState.facebook.lastRunDate = today;
+    saveBatchState(batchState);
+    console.log(`   📍 FB: Next batch will start at row ${batchState.facebook.nextRowIndex}`);
+  }
+
+  return rows;
 }
 
 /**
- * Get rows for LI posting (TODO: implement priority ordering)
+ * Get rows for LI posting (continuous picking - Feature 1)
+ * Picks rows sequentially: 1-15, then 16-30, etc. No daily reset.
  */
 async function getRowsForLi(limit: number): Promise<SheetRow[]> {
-  // TODO: Query sheet for rows where liPostUrl is empty, ordered by priority
-  // For now return empty
-  return [];
+  const batchState = getBatchState();
+  const today = new Date().toISOString().split('T')[0];
+
+  // Reset nextRowIndex if it's a new day
+  if (batchState.linkedin.lastRunDate !== today) {
+    // Don't reset - continue from where we left off
+    // This enables week-long continuous posting
+  }
+
+  const rows = await getRowsWithoutLiUrl(batchState.linkedin.nextRowIndex, limit);
+
+  // Update next row index for next batch
+  if (rows.length > 0) {
+    batchState.linkedin.nextRowIndex += rows.length;
+    batchState.linkedin.lastRunDate = today;
+    saveBatchState(batchState);
+    console.log(`   📍 LI: Next batch will start at row ${batchState.linkedin.nextRowIndex}`);
+  }
+
+  return rows;
 }
 
 /**
@@ -328,21 +388,68 @@ export async function runWeeklySerpRecheck(): Promise<void> {
 
     const today = new Date();
     const todayIso = today.toISOString().split('T')[0];
-    const sevenDaysAgo = new Date(today.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
 
-    // TODO: Query sheet for rows where lastSerpCheckDate <= 7 days ago
-    // For now, log the schedule
-    console.log(`📅 Checking URLs with lastSerpCheckDate <= ${sevenDaysAgo}`);
-    console.log(`🔄 Today's date: ${todayIso}\n`);
+    // Step 1: Get URLs due for re-check (> 7 days old)
+    const urlsToRecheck = await getUrlsDueForRecheck();
 
-    // TODO: For each URL:
-    // 1. Call runSeoAnalysis(url) to get new ranking
-    // 2. Compare old priority vs new priority
-    // 3. If changed: call runContentAgent() to regenerate content
-    // 4. Update sheet with: seoRanking, priority, lastSerpCheckDate, tweetPost, fbPost, liPost, blogPost
-    // 5. Clear old posting URLs (tweetUrl, fbPostUrl, liPostUrl) so they can be re-posted
+    if (urlsToRecheck.length === 0) {
+      console.log('✅ No URLs due for re-check today\n');
+      return;
+    }
 
-    console.log('✅ [WEEKLY RECHECK] Completed\n');
+    console.log(`📊 Found ${urlsToRecheck.length} URLs due for re-check\n`);
+
+    let recheckCount = 0;
+    let priorityChangedCount = 0;
+
+    // Step 2: For each URL, re-run SEO analysis
+    for (const row of urlsToRecheck) {
+      try {
+        console.log(`\n🔄 Re-checking: ${row.targetUrl.substring(0, 60)}...`);
+
+        // Re-run SEO analysis
+        const newSeoResult = await runSeoAnalysis({
+          url: row.targetUrl,
+          title: row.title,
+        });
+
+        // Get old priority
+        const oldPriority = row.seoRanking || 'Unknown';
+
+        // Check if priority changed
+        const priorityChanged = oldPriority !== newSeoResult.priority;
+
+        if (priorityChanged) {
+          console.log(`   📈 Priority changed: ${oldPriority} → ${newSeoResult.priority}`);
+          priorityChangedCount++;
+
+          // Regenerate content with new priority
+          console.log(`   📝 Regenerating content...`);
+          const newContent = await runContentAgent({
+            url: row.targetUrl,
+            title: row.title,
+            seoRanking: newSeoResult.seoRanking,
+            priority: newSeoResult.priority,
+          });
+
+          // Save re-check with new content
+          await saveWeeklySerpRecheck(row, newSeoResult, newContent);
+          console.log(`   ✅ Content regenerated and saved`);
+        } else {
+          console.log(`   ✅ Priority unchanged: ${oldPriority}`);
+          // Save re-check without new content
+          await saveWeeklySerpRecheck(row, newSeoResult);
+        }
+
+        recheckCount++;
+      } catch (err: any) {
+        console.error(`   ❌ Error re-checking row ${row.rowIndex}: ${err.message}`);
+      }
+    }
+
+    console.log(`\n✅ [WEEKLY RECHECK] Completed`);
+    console.log(`   Re-checked: ${recheckCount}/${urlsToRecheck.length}`);
+    console.log(`   Priority changed: ${priorityChangedCount}\n`);
   } catch (err: any) {
     console.error(`❌ [WEEKLY RECHECK] Error: ${err.message}\n`);
   }

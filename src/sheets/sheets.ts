@@ -370,6 +370,53 @@ export async function saveUnifiedLinkedInResult(
   console.log(`   📝 LinkedIn updated for row ${row.rowIndex}: ${result.status}`);
 }
 
+// ── Save weekly SERP re-check results (Feature 2) ────────────────────────────
+
+export async function saveWeeklySerpRecheck(
+  row: SheetRow,
+  seoResult: {
+    seoRanking: number;
+    seoIndexed: string;
+    priority: string;
+    keywords: string[];
+  },
+  contentResult?: {
+    tweet: string;
+    fbPost: string;
+    liPost: string;
+    blog: string;
+  }
+): Promise<void> {
+  const sheets = await getSheetsClient();
+  const colMap = await getColumnMap(sheets);
+  const today = new Date().toISOString().split('T')[0];
+
+  const updates = [
+    { names: ['seoRanking', 'seoran', 'seo ranking'],                    value: seoResult.priority },
+    { names: ['seoIndexed', 'seoindexed'],                              value: seoResult.seoIndexed },
+    { names: ['seoKeywords', 'seokeywords'],                            value: seoResult.keywords.join(', ') },
+    { names: ['lastSerpCheckDate', 'last serp check date'],             value: today },
+    { names: ['priorityAssignedDate', 'priority assigned date'],        value: today },
+    // Clear old post URLs so they can be re-posted
+    { names: ['xPostUrl', 'x post url'],                                value: '' },
+    { names: ['FB Post URL', 'fb post url'],                            value: '' },
+    { names: ['LinkedIn Post URL', 'linkedin post url'],                value: '' },
+  ];
+
+  // If content was regenerated, update it
+  if (contentResult) {
+    updates.push(
+      { names: ['X Post', 'x post', 'xPost'],                           value: contentResult.tweet },
+      { names: ['FB Post', 'fb post', 'fbPost'],                        value: contentResult.fbPost },
+      { names: ['LinkedIn Post', 'linkedin post', 'linkedinPost'],      value: contentResult.liPost },
+      { names: ['Message Status'],                                      value: contentResult.blog }
+    );
+  }
+
+  const data = buildUpdates(colMap, row.rowIndex, updates);
+  await batchWrite(sheets, data);
+  console.log(`   📊 SERP re-checked for row ${row.rowIndex}: ${seoResult.priority} (${today})`);
+}
 
 // ── Read a single row by 1-based row index ─────────────────────────────────
 
@@ -700,6 +747,45 @@ export async function getRowsWithoutLiUrl(startRowIndex: number, limit: number =
   }
 
   console.log(`   📋 LI: Found ${results.length} rows starting from index ${startRowIndex}`);
+  return results;
+}
+
+// ── Get URLs due for weekly SERP re-check (Week 2+ feature) ──────────────────
+
+export async function getUrlsDueForRecheck(): Promise<SheetRow[]> {
+  const sheets = await getSheetsClient();
+  const colMap = await getColumnMap(sheets);
+
+  const res = await withRetry(() => sheets.spreadsheets.values.get({
+    spreadsheetId: SHEET_ID,
+    range: `${SHEET_NAME}!A:AH`,
+  }), 'getUrlsDueForRecheck');
+
+  const rows: string[][] = res.data.values ?? [];
+  const results: SheetRow[] = [];
+  const today = new Date();
+  const sevenDaysAgo = new Date(today.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+
+  for (let i = 1; i < rows.length; i++) {
+    const row = rows[i];
+    const targetUrl = row[col(colMap, 'targetUrl', 'targeturl') ?? -1] ?? '';
+    const lastSerpCheckDate = row[col(colMap, 'lastSerpCheckDate', 'last serp check date') ?? -1] ?? '';
+    const priority = row[col(colMap, 'priority', 'seoRanking') ?? -1] ?? '';
+
+    // Need: targetUrl exists AND priority was assigned AND lastSerpCheckDate <= 7 days ago
+    if (!targetUrl.trim()) continue;
+    if (!priority.trim()) continue; // Skip unprocessed URLs
+
+    // If no lastSerpCheckDate, it's new - skip
+    if (!lastSerpCheckDate.trim()) continue;
+
+    // Check if > 7 days old
+    if (lastSerpCheckDate <= sevenDaysAgo) {
+      results.push(mapRow(row, colMap, i + 1));
+    }
+  }
+
+  console.log(`   📊 Found ${results.length} URLs due for SERP re-check (> 7 days old)`);
   return results;
 }
 
