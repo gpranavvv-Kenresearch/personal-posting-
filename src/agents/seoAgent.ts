@@ -17,7 +17,8 @@ export type Platform = 'x' | 'facebook' | 'linkedin';
 
 export interface SeoAnalysisResult {
   indexStatus: 'indexed' | 'not_indexed' | 'unknown';
-  rankPage: number;       // 1-10, 99 = not indexed / unknown
+  rankPage:     number;   // page number 1-10 (internal — used for platform decisions); 99 = beyond top 100
+  rankPosition: number;   // exact Google position 1-100; 0 = indexed but outside top 100; -1 = unknown
   keywords: string[];     // top trending keywords
   platforms: Platform[];  // decided based on ranking
 }
@@ -40,8 +41,8 @@ function decidePlatforms(indexStatus: string, rankPage: number, title: string): 
     // Weak/no ranking → boost on all platforms
     if (PLATFORMS_ENABLED.facebook) platforms.push('facebook');
     if (PLATFORMS_ENABLED.linkedin) platforms.push('linkedin');
-  } else if (rankPage >= 4 && rankPage <= 6) {
-    // Mid ranking → one extra platform based on topic type
+  } else if (rankPage >= 3 && rankPage <= 6) {
+    // Mid ranking (pages 3–6) → one extra platform based on topic type
     const isB2B = /enterprise|consulting|policy|government|industrial|manufacturing|b2b|corporate/i.test(title);
     if (isB2B  && PLATFORMS_ENABLED.linkedin) platforms.push('linkedin');
     if (!isB2B && PLATFORMS_ENABLED.facebook) platforms.push('facebook');
@@ -100,17 +101,18 @@ export async function runSeoAnalysis(targetUrl: string, title: string): Promise<
 
   const keywords: string[] = generateKeywordPhrases(rawSlug || slug);
   let indexStatus: 'indexed' | 'not_indexed' | 'unknown' = 'unknown';
-  let rankPage = 99;
+  let rankPage     = 99;   // page number (1-10) for platform decision; 99 = outside top 100
+  let rankPosition = -1;   // exact position (1-100); 0 = indexed but not in top 100; -1 = unknown
 
   // ── SerpAPI: organic rank check ────────────────────────────────────────────
-  // Search Google for the raw URL slug and look for a kenresearch.com result.
-  // If found → indexed + real position. If not found → site: fallback check.
+  // Search the raw slug (e.g. "india-gene-therapy-market") in Google top 100.
+  // If the kenresearch.com URL appears → record EXACT position (1-100).
+  // If not in top 100 → site: fallback to check if indexed at all.
   if (settings.serpApi.keys.length === 0) {
     console.log('   ⚠️  No SERPAPI keys set — skipping index check, defaulting to all platforms');
     indexStatus = 'unknown';
   } else {
-    // Use the raw slug as the search query (e.g. "india-gene-therapy-market")
-    const searchQuery = rawSlug;
+    const searchQuery = rawSlug.replace(/-/g, ' ');   // e.g. "apac insulin market"
     const rankData = await callSerpApi({ engine: 'google', q: searchQuery, num: '100' }).catch((err: any) => {
       console.warn(`   ⚠️  SerpAPI rank check failed: ${err.message}`);
       return null;
@@ -118,29 +120,35 @@ export async function runSeoAnalysis(targetUrl: string, title: string): Promise<
 
     if (rankData) {
       const organic: any[] = rankData.organic_results ?? [];
-      // Match: result must be from kenresearch.com AND contain the specific report path
+
+      // Extract URL path to match exactly (e.g. "/apac-insulin-market")
       let urlPath = '';
       try { urlPath = new URL(targetUrl).pathname.toLowerCase().replace(/\/$/, ''); } catch { urlPath = targetUrl.toLowerCase(); }
+
       const match = organic.find((r: any) => {
         const link = (r.link ?? '').toLowerCase().replace(/\/$/, '');
         return link.includes('kenresearch.com') && link.includes(urlPath);
       });
 
       if (match) {
-        indexStatus = 'indexed';
-        const position = match.position ?? organic.indexOf(match) + 1;
-        rankPage = Math.ceil(position / 10);
-        console.log(`   ✅ Found in organic results — position ${position} (page ${rankPage})`);
+        // ── FOUND in top 100 ──────────────────────────────────────────────
+        indexStatus  = 'indexed';
+        rankPosition = typeof match.position === 'number' ? match.position : organic.indexOf(match) + 1;
+        rankPage     = Math.ceil(rankPosition / 10);
+        const pageLabel = `page ${rankPage}`;
+        console.log(`   ✅ Ranked #${rankPosition} on Google (${pageLabel}) — query: "${searchQuery}"`);
       } else {
-        // Step 2: URL not in top 100 organic — check if it's indexed at all via site: query
+        // ── NOT in top 100 — check if indexed at all via site: ─────────────
         const siteData = await callSerpApi({ engine: 'google', q: `site:${targetUrl}`, num: '1' }).catch(() => null);
         if (siteData && (siteData.organic_results ?? []).length > 0) {
-          indexStatus = 'indexed';
-          rankPage = 99; // indexed but not ranking in top 100
-          console.log(`   ✅ Indexed but not ranking in top 100 results (beyond page 10)`);
+          indexStatus  = 'indexed';
+          rankPage     = 99;
+          rankPosition = 0;   // indexed but outside top 100
+          console.log(`   ✅ Indexed but NOT in top 100 results for "${searchQuery}"`);
         } else {
-          indexStatus = 'not_indexed';
-          rankPage = 99;
+          indexStatus  = 'not_indexed';
+          rankPage     = 99;
+          rankPosition = 0;
           console.log(`   ❌ Not found in Google — not indexed`);
         }
       }
@@ -152,9 +160,15 @@ export async function runSeoAnalysis(targetUrl: string, title: string): Promise<
   console.log(`   🔑 Keywords: ${keywords.join(' | ')}`);
 
   const platforms = decidePlatforms(indexStatus, rankPage, title);
-  console.log(`   🎯 Platforms: ${platforms.join(', ')} (index=${indexStatus}, page=${rankPage === 99 ? 'N/A' : rankPage})`);
 
-  return { indexStatus, rankPage, keywords, platforms };
+  // Human-readable rank summary
+  let rankSummary: string;
+  if (rankPosition > 0)       rankSummary = `position ${rankPosition} (page ${rankPage})`;
+  else if (rankPosition === 0) rankSummary = indexStatus === 'indexed' ? 'indexed, beyond top 100' : 'not indexed';
+  else                         rankSummary = 'unknown';
+  console.log(`   🎯 Platforms: ${platforms.join(', ')} | Rank: ${rankSummary}`);
+
+  return { indexStatus, rankPage, rankPosition, keywords, platforms };
 }
 
 export interface SeoResult {

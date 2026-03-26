@@ -42,7 +42,7 @@ export async function postToFacebook(
   await humanDelay(800, 1200);
 
   console.log('   Typing post...');
-  await page.keyboard.type(postText, { delay: 60 });
+  await page.keyboard.type(postText);
   await humanDelay(1500, 2500);
 
   // Click the Post button inside the dialog

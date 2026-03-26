@@ -1,127 +1,174 @@
 /**
- * xPostingAgent.ts — X (Twitter) Platform Specialist
- *
- * Owns the full X posting flow for a single row:
- *   generate tweet → sanity check → SEO optimize → login → post
- *
- * Does NOT write to Google Sheets — the caller saves results.
+ * xPostingAgent.ts — X (Twitter) Posting Agent
+ * Handles posting content to X/Twitter platform
+ * Wraps the existing twitter/poster.ts logic
  */
 
-import { SheetRow } from '../sheets/sheets.js';
-import { XAccount } from '../config/accounts.js';
-import { BatchContext } from './sanityAgent.js';
-import { generateTweetFromSheetRow } from './contentGenerator.js';
-import { runSanityCheck } from './sanityAgent.js';
-import { runSeoOptimize } from './seoAgent.js';
+import { getAccountByHandle } from '../config/accounts.js';
 import { loginToX, closeBrowser } from '../browser/twitter/login.js';
 import { postTweet } from '../browser/twitter/poster.js';
+import { xAccountHasCapacity, incrementCount as incrementXCount } from '../config/accountTracker.js';
+import { saveLastPosted } from '../sheets/sheets.js';
 import { humanDelay } from '../browser/stagehand.js';
+import { startPopupGuard, clearPopups } from '../browser/popupGuard.js';
 
-const MAX_GENERATION_RETRIES = 3;
-const MIN_SEO_SCORE_TO_POST = 70;
-
-export interface XPostResult {
-  success: boolean;
-  tweetUrl: string;
-  tweetText: string;
-  seoScore: number;
-  sanityIssues: string[];
+export interface XPostingResult {
+  postUrl: string;
+  status: 'success' | 'failed';
   error?: string;
 }
 
-export async function runXPostingAgent(
-  row: SheetRow,
-  account: XAccount,
-  batchCtx?: BatchContext,
-): Promise<XPostResult> {
-  // ── Step 1: Generate tweet → sanity → SEO (with retry loop) ──────────────
-  let tweet = row.xPost || '';
-  let finalSeoScore = 0;
-  let readyToPost = false;
-  let allSanityIssues: string[] = [];
+const MAX_POST_RETRIES = 3;
 
-  if (tweet) {
-    console.log(`   ♻️  Using existing tweet from sheet`);
-    const sanity = await runSanityCheck(tweet, row, batchCtx);
-    allSanityIssues = sanity.issues;
-    if (!sanity.valid) {
-      return { success: false, tweetUrl: '', tweetText: tweet, seoScore: 0, sanityIssues: allSanityIssues, error: `Sanity: ${sanity.issues.join(' | ')}` };
+/**
+ * Post content to X/Twitter
+ * @param content Tweet content (max 280 chars)
+ * @param accountName Account nickname to post from
+ * @returns Posting result with URL
+ */
+export async function postTweetToX(content: string, accountName: string): Promise<XPostingResult> {
+  try {
+    console.log(`   🐦 Posting to X as @${accountName}: "${content.substring(0, 50)}..."`);
+
+    // Check capacity
+    if (!xAccountHasCapacity(accountName)) {
+      return {
+        postUrl: '',
+        status: 'failed',
+        error: `Daily X limit reached for ${accountName}`,
+      };
     }
-    if (sanity.sanitized) tweet = sanity.sanitized;
-    const seo = await runSeoOptimize(tweet, row);
-    finalSeoScore = seo.seoScore;
-    tweet = seo.optimized;
-    readyToPost = true;
-  } else {
-    for (let attempt = 1; attempt <= MAX_GENERATION_RETRIES; attempt++) {
-      if (attempt > 1) console.log(`   🔄 Regenerating tweet (attempt ${attempt}/${MAX_GENERATION_RETRIES})...`);
 
+    // Get account credentials
+    const xAccount = getAccountByHandle(accountName);
+    if (!xAccount) {
+      return {
+        postUrl: '',
+        status: 'failed',
+        error: `Account not found: ${accountName}`,
+      };
+    }
+
+    // Login to X
+    let page: any;
+    let stopGuard: (() => void) | null = null;
+    let lastError = '';
+
+    try {
+      page = await loginToX(xAccount);
+      stopGuard = startPopupGuard(page);
+    } catch (err: any) {
+      await closeBrowser();
+      return {
+        postUrl: '',
+        status: 'failed',
+        error: `Login failed: ${err.message}`,
+      };
+    }
+
+    // Retry logic for posting
+    for (let attempt = 1; attempt <= MAX_POST_RETRIES; attempt++) {
       try {
-        tweet = await generateTweetFromSheetRow({
-          targetUrl: row.targetUrl,
-          marketValue: row.marketValue,
-          title: row.title,
-        });
+        // Clear popups and wait
+        await clearPopups(page).catch(() => {});
+        await humanDelay(2000, 4000);
+
+        // Post tweet
+        const result = await postTweet(page, content, xAccount.handle);
+
+        // Increment counter
+        incrementXCount('x', accountName);
+        stopGuard?.();
+        await closeBrowser().catch(() => {});
+
+        console.log(`   ✅ Posted to X: ${result.tweetUrl}`);
+
+        return {
+          postUrl: result.tweetUrl,
+          status: 'success',
+        };
       } catch (err: any) {
-        return { success: false, tweetUrl: '', tweetText: '', seoScore: 0, sanityIssues: [], error: `Generation failed: ${err.message}` };
-      }
+        lastError = err.message;
+        console.log(`   🔁 X post attempt ${attempt}/${MAX_POST_RETRIES} failed: ${lastError}`);
 
-      const sanity = await runSanityCheck(tweet, row, batchCtx);
-      allSanityIssues = sanity.issues;
-      if (!sanity.valid) {
-        console.log(`   ⚠️  Sanity failed (attempt ${attempt}) — retrying...`);
-        continue;
+        if (attempt < MAX_POST_RETRIES) {
+          // Clear and retry
+          await clearPopups(page).catch(() => {});
+          await humanDelay(3000, 5000);
+          await page.goto('https://x.com/home', { waitUntil: 'domcontentloaded' }).catch(() => {});
+          await humanDelay(2000, 3000);
+          await clearPopups(page).catch(() => {});
+        }
       }
-      if (sanity.sanitized) tweet = sanity.sanitized;
-
-      const seo = await runSeoOptimize(tweet, row);
-      finalSeoScore = seo.seoScore;
-      tweet = seo.optimized;
-
-      if (finalSeoScore >= MIN_SEO_SCORE_TO_POST) {
-        readyToPost = true;
-        break;
-      }
-      console.log(`   ⚠️  SEO score ${finalSeoScore} < ${MIN_SEO_SCORE_TO_POST} (attempt ${attempt}) — retrying generation...`);
     }
-  }
 
-  if (!readyToPost) {
+    // All retries failed
+    stopGuard?.();
+    await closeBrowser().catch(() => {});
+
     return {
-      success: false,
-      tweetUrl: '',
-      tweetText: tweet,
-      seoScore: finalSeoScore,
-      sanityIssues: allSanityIssues,
-      error: `SEO score ${finalSeoScore} < ${MIN_SEO_SCORE_TO_POST} after ${MAX_GENERATION_RETRIES} attempts`,
+      postUrl: '',
+      status: 'failed',
+      error: `Failed after ${MAX_POST_RETRIES} attempts: ${lastError}`,
+    };
+  } catch (err) {
+    const errorMsg = err instanceof Error ? err.message : String(err);
+    console.error(`   ❌ X posting failed: ${errorMsg}`);
+
+    return {
+      postUrl: '',
+      status: 'failed',
+      error: errorMsg,
     };
   }
+}
 
-  console.log(`   📊 SEO score: ${finalSeoScore}/100`);
+/**
+ * Post to X and update sheet with result
+ * @param content Tweet content
+ * @param accountName Account nickname
+ * @param rowIndex Sheet row index (for updating lastPostedX)
+ * @param today ISO date string (YYYY-MM-DD)
+ * @returns Result with postUrl
+ */
+export async function postTweetAndSaveResult(
+  content: string,
+  accountName: string,
+  rowIndex: number,
+  today: string
+): Promise<XPostingResult> {
+  const result = await postTweetToX(content, accountName);
 
-  // ── Step 2: Login to X ────────────────────────────────────────────────────
-  let page: any;
-  try {
-    console.log(`   🔐 Logging in as @${account.handle}...`);
-    page = await loginToX(account);
-    console.log(`   ✅ Session ready for @${account.handle}`);
-  } catch (err: any) {
-    await closeBrowser();
-    return { success: false, tweetUrl: '', tweetText: tweet, seoScore: finalSeoScore, sanityIssues: allSanityIssues, error: `Login failed: ${err.message}` };
+  if (result.status === 'success') {
+    // Update lastPostedX in sheet
+    try {
+      await saveLastPosted(rowIndex, 'x', today);
+      console.log(`   📝 Updated lastPostedX for row ${rowIndex}`);
+    } catch (err) {
+      console.warn(`   ⚠️  Could not update lastPostedX: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
-  // ── Step 3: Post tweet ────────────────────────────────────────────────────
-  try {
-    await humanDelay(2000, 4000);
-    console.log(`   📝 Posting tweet for @${account.handle}...`);
-    const result = await postTweet(page, tweet, account.handle);
-    console.log(`   ✅ Posted!`);
-    console.log(`   🔗 URL: ${result.tweetUrl}`);
-    return { success: true, tweetUrl: result.tweetUrl, tweetText: tweet, seoScore: finalSeoScore, sanityIssues: allSanityIssues };
-  } catch (err: any) {
-    return { success: false, tweetUrl: '', tweetText: tweet, seoScore: finalSeoScore, sanityIssues: allSanityIssues, error: `Post failed: ${err.message}` };
-  } finally {
-    await closeBrowser();
-    console.log(`   🔒 Browser closed for @${account.handle}`);
+  return result;
+}
+
+/**
+ * Batch post to X for multiple pieces of content
+ * @param posts Array of { content, accountName } to post
+ * @returns Array of results
+ */
+export async function batchPostToX(
+  posts: Array<{ content: string; accountName: string }>
+): Promise<XPostingResult[]> {
+  const results: XPostingResult[] = [];
+
+  for (const post of posts) {
+    const result = await postTweetToX(post.content, post.accountName);
+    results.push(result);
+
+    // Small delay between posts to avoid rate limiting
+    await new Promise(r => setTimeout(r, 2000));
   }
+
+  return results;
 }

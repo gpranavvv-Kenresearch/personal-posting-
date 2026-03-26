@@ -21,7 +21,8 @@
       "Bash(node --import=tsx src/index.ts x-flow avdhesh 5)",
       "Bash(node --import=tsx src/index.ts x-flow abhinav 5)",
       "Bash(node --import=tsx src/index.ts run-batch 6)",
-      "Bash(npx tsc:*)"
+      "Bash(npx tsc:*)",
+      "Bash(npx tsx:*)"
     ]
   }
 }

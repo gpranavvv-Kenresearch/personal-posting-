@@ -6,6 +6,28 @@ import { extractReportData } from './reportDataAgent.js';
 
 const OPENROUTER_MODEL = 'google/gemini-2.0-flash-001';
 
+// ── UTM helper ─────────────────────────────────────────────────────────────
+// Strips any existing UTM params then appends the correct ones for the platform.
+
+const UTM_PARAMS: Record<'x' | 'facebook' | 'linkedin', string> = {
+  x:        'utm_source=X&utm_medium=social_organic&utm_campaign=Automation',
+  facebook: 'utm_source=Facebook&utm_medium=social_organic&utm_campaign=Automation',
+  linkedin: 'utm_source=Linkedin&utm_medium=social_organic&utm_campaign=Automation',
+};
+
+export function buildUtmUrl(targetUrl: string, platform: 'x' | 'facebook' | 'linkedin'): string {
+  // Remove any existing utm_* params
+  let base = targetUrl;
+  try {
+    const u = new URL(targetUrl);
+    ['utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term'].forEach(k => u.searchParams.delete(k));
+    base = u.toString().replace(/\?$/, '');  // strip trailing '?' if params now empty
+  } catch {
+    base = targetUrl.split('?')[0];  // fallback: strip everything after ?
+  }
+  return `${base}?${UTM_PARAMS[platform]}`;
+}
+
 // ── Tavily: fetch latest web stats for a report topic ─────────────────────
 // Used to inject real current data into the tweet generation prompt.
 
@@ -79,20 +101,21 @@ export async function generateTweetFromSheetRow(params: {
   keyStats?: string[];
 }): Promise<string> {
   const { targetUrl, title = '' } = params;
-  let { marketValue = '', cagr = '', keyStats = [] } = params;
+  const xUrl = buildUtmUrl(targetUrl, 'x');
+  let marketValue = '';
+  let cagr = '';
+  let keyStats: string[] = [];
 
   console.log(`   Generating tweet for: ${targetUrl}`);
 
-  // Extract report data if market value not provided
-  if (!marketValue) {
-    try {
-      const reportData = await extractReportData(targetUrl);
-      if (reportData.marketValue) marketValue = reportData.marketValue;
-      if (!cagr && reportData.cagr)           cagr = reportData.cagr;
-      if (!keyStats.length && reportData.keyStats.length) keyStats = reportData.keyStats;
-    } catch (err: any) {
-      console.warn(`   ⚠️  reportDataAgent failed: ${err.message}`);
-    }
+  // Always fetch stats from Tavily/reportDataAgent — never read from sheet
+  try {
+    const reportData = await extractReportData(targetUrl);
+    if (reportData.marketValue) marketValue = reportData.marketValue;
+    if (reportData.cagr)        cagr        = reportData.cagr;
+    if (reportData.keyStats.length) keyStats = reportData.keyStats;
+  } catch (err: any) {
+    console.warn(`   ⚠️  reportDataAgent failed: ${err.message}`);
   }
 
   // Fetch latest web stats via Tavily to ground the AI in real current data
@@ -127,9 +150,9 @@ WHAT MAKES THAT TWEET WORK:
 - 2 hashtags at the very end
 
 YOUR FORMAT (follow exactly):
-[emoji] [Market context + value if available]. [Specific data point — policy/%, driver, deadline]. [1-sentence punchy closer.] ${targetUrl}?utm_source=X&utm_medium=social_organic&utm_campaign=Automation #[Tag1] #[Tag2]
+[emoji] [Market context + value if available]. [Specific data point — policy/%, driver, deadline]. [1-sentence punchy closer.] ${xUrl} #[Tag1] #[Tag2]
 
-IMPORTANT: Copy the URL above exactly as written. Do not shorten, alter, or paraphrase it.
+IMPORTANT: The URL for this tweet is: ${xUrl} — copy it exactly as written. Do not shorten, alter, or paraphrase it.
 
 STEP 1 — Identify the topic from the URL:
 - Take the last path segment, replace hyphens with spaces
@@ -169,7 +192,7 @@ OUTPUT RULES:
 - Do not repeat the same hook structure across different tweets.`,
     messages: [{
       role: 'user',
-      content: `Generate the X post.\nURL: ${targetUrl}${reportContextStr ? `\n\nReport data (use these real figures — do NOT invent additional numbers):\n${reportContextStr}` : ''}${webStats ? `\n\nRecent web data:\n${webStats}` : ''}`,
+      content: `Generate the X post.\nURL to use in tweet: ${xUrl}${reportContextStr ? `\n\nReport data (use these real figures — do NOT invent additional numbers):\n${reportContextStr}` : ''}${webStats ? `\n\nRecent web data:\n${webStats}` : ''}`,
     }],
   });
 
@@ -370,21 +393,20 @@ export async function generateLinkedInPost(
   keyStats?: string[],
 ): Promise<string> {
   console.log(`   Generating LinkedIn post for: ${targetUrl}`);
+  const liUrl = buildUtmUrl(targetUrl, 'linkedin');
 
-  let mv  = marketValue || '';
-  let cr  = cagr        || '';
-  let ks  = keyStats    || [];
+  let mv = '';
+  let cr = '';
+  let ks: string[] = [];
 
-  // Extract report data if market value not provided
-  if (!mv) {
-    try {
-      const reportData = await extractReportData(targetUrl);
-      if (reportData.marketValue) mv = reportData.marketValue;
-      if (!cr && reportData.cagr)           cr = reportData.cagr;
-      if (!ks.length && reportData.keyStats.length) ks = reportData.keyStats;
-    } catch (err: any) {
-      console.warn(`   ⚠️  reportDataAgent failed: ${err.message}`);
-    }
+  // Always fetch stats from Tavily/reportDataAgent — never read from sheet
+  try {
+    const reportData = await extractReportData(targetUrl);
+    if (reportData.marketValue) mv = reportData.marketValue;
+    if (reportData.cagr)        cr = reportData.cagr;
+    if (reportData.keyStats.length) ks = reportData.keyStats;
+  } catch (err: any) {
+    console.warn(`   ⚠️  reportDataAgent failed: ${err.message}`);
   }
 
   const reportLines: string[] = [];
@@ -398,47 +420,49 @@ export async function generateLinkedInPost(
     max_tokens: 900,
     system: `You are a senior market research analyst writing thought-leadership posts for LinkedIn on behalf of Ken Research.
 
-STRUCTURE (follow this exactly):
+OUTPUT FORMAT — follow this structure exactly, using real blank lines between sections:
 
-Line 1 — HOOK: One sharp, declarative sentence that states the core market insight. No emoji. No fluff. Must make a professional stop scrolling.
+[One sharp, declarative hook sentence stating the core market insight. No emoji. No fluff. Must make a professional stop scrolling.]
 
-[blank line]
+[Short paragraph of 2-3 sentences: set the context. What industry/market is this? What is driving it? What does it mean for businesses or investors?]
 
-SHORT PARAGRAPH (2-3 sentences): Set the context. What industry/market is this? What's driving it? What does it mean for businesses or investors?
+Key Takeaways:
+• [Concrete insight, trend, or implication — lead with data or fact, explain why it matters. Under 20 words.]
+• [Second bullet]
+• [Third bullet]
+• [Optional fourth bullet]
+• [Optional fifth bullet]
 
-[blank line]
+[One closing sentence — forward-looking statement or professional call to action — followed by the exact URL from the user message on the same or next line.]
 
-KEY TAKEAWAYS heading followed by 3-5 bullet points:
-• Each bullet is one concrete insight, trend, or implication
-• Lead with the data or fact, then explain why it matters
-• Keep each bullet under 20 words
+[5-8 relevant hashtags on the final line, mix of broad and niche]
 
-[blank line]
-
-CLOSING LINE: One sentence — forward-looking statement or professional call to action. Then on the same line or next line: the URL.
-
-[blank line]
-
-HASHTAGS: 5-8 relevant hashtags on the final line (mix of broad and niche)
-
-TONE: Authoritative, analytical, peer-to-peer. Write like a VP of Strategy sharing insight with their network — not like a marketing email.
+TONE: Authoritative, analytical, peer-to-peer. Write like a VP of Strategy sharing insight with their network, not like a marketing email.
 
 RULES:
-- Total length: 200–350 words
+- Total length: 200-350 words
 - NEVER invent statistics. If no market value is given, write qualitative insights only.
 - Forbidden words: reshaping, accelerating, transforming, booming, game-changer, disrupting, revolutionizing, skyrocketing
-- The URL must be copied exactly as given — do not alter it
+- The URL must be copied exactly as given in the user message — do not alter it
 - No markdown formatting (no **, no ##) — plain text only
-- No labels like "HOOK:" or "KEY TAKEAWAYS:" — just the content itself`,
+- No bracket labels like [blank line], [HOOK], [KEY TAKEAWAYS] in your output — just the actual content`,
     messages: [
       {
         role: 'user',
-        content: `Write a LinkedIn post.\nURL: ${targetUrl}\nReport title: ${title || ''}${reportContext ? `\n${reportContext}` : ''}`,
+        content: `Write a LinkedIn post.\nURL to include in post: ${liUrl}\nReport title: ${title || ''}${reportContext ? `\n${reportContext}` : ''}`,
       },
     ],
   });
 
-  const post = response.content[0].type === 'text' ? response.content[0].text.trim() : '';
+  let post = response.content[0].type === 'text' ? response.content[0].text.trim() : '';
+
+  // Post-process: strip formatting artifacts that sometimes leak from prompts
+  post = post
+    .replace(/\[blank line\]/gi, '')
+    .replace(/\[[^\]]{1,40}\]/g, '')          // any remaining short bracket labels
+    .replace(/\n{3,}/g, '\n\n')               // 3+ blank lines → max 2
+    .trim();
+
   console.log(`   ✅ LinkedIn post generated (${post.length} chars)`);
   return post;
 }
@@ -455,20 +479,18 @@ export async function generateFacebookPost(
 ): Promise<string> {
   console.log(`   Generating Facebook post for: ${targetUrl}`);
 
-  let mv  = marketValue || '';
-  let cr  = cagr        || '';
-  let ks  = keyStats    || [];
+  let mv = '';
+  let cr = '';
+  let ks: string[] = [];
 
-  // Extract report data if market value not provided
-  if (!mv) {
-    try {
-      const reportData = await extractReportData(targetUrl);
-      if (reportData.marketValue) mv = reportData.marketValue;
-      if (!cr && reportData.cagr)           cr = reportData.cagr;
-      if (!ks.length && reportData.keyStats.length) ks = reportData.keyStats;
-    } catch (err: any) {
-      console.warn(`   ⚠️  reportDataAgent failed: ${err.message}`);
-    }
+  // Always fetch stats from Tavily/reportDataAgent — never read from sheet
+  try {
+    const reportData = await extractReportData(targetUrl);
+    if (reportData.marketValue) mv = reportData.marketValue;
+    if (reportData.cagr)        cr = reportData.cagr;
+    if (reportData.keyStats.length) ks = reportData.keyStats;
+  } catch (err: any) {
+    console.warn(`   ⚠️  reportDataAgent failed: ${err.message}`);
   }
 
   const reportLines: string[] = [];
@@ -478,39 +500,32 @@ export async function generateFacebookPost(
   const reportContext = reportLines.join('\n');
 
   // Build UTM URL for the closing CTA
-  const utmUrl = `${targetUrl}?utm_source=auto&utm_medium=Referal&utm_campaign=${nickname || 'kenresearch'}`;
+  const utmUrl = buildUtmUrl(targetUrl, 'facebook');
 
   const response = await callOpenRouter({
     model: OPENROUTER_MODEL,
     max_tokens: 700,
     system: `You are a writer creating Facebook posts for Ken Research's page. Ken Research publishes market research reports.
 
-STRUCTURE (follow this exactly):
+OUTPUT FORMAT — follow this structure exactly, using real blank lines between sections:
 
-Line 1 — OPENING: Start with a relatable question OR a surprising everyday observation that connects to the market topic. Use 1-2 emojis naturally. Keep it under 20 words. This should make a general audience curious — not just industry professionals.
+[Opening line — one relatable question OR surprising everyday observation connected to the market topic. Use 1-2 emojis naturally. Under 20 words. Must make a general audience curious, not just industry insiders.]
 
-[blank line]
+[Body — 2 to 3 short paragraphs, each 2-3 sentences. Tell a mini-story or explain the trend in plain English. Avoid jargon. Write like explaining this to a curious friend, not a boardroom.]
 
-BODY (2-3 short paragraphs): Tell a mini-story or explain the trend in plain English. Avoid jargon. Write like you're explaining this to a curious friend, not a boardroom. Each paragraph should be 2-3 sentences max.
-
-[blank line]
-
-CLOSING CTA (copy this format exactly, vary only the wording slightly):
 For deeper insights into market size, competitive benchmarking, segment analysis, and forecasts, explore the full research report here: {{UTM_URL}}
 
-[blank line]
-
-HASHTAGS: 8-12 relevant hashtags on the final line. Mix broad industry tags with specific topic tags.
+[8-12 relevant hashtags on one line. Mix broad industry tags with specific topic tags.]
 
 TONE: Warm, curious, accessible. Not corporate. Not salesy. Think Facebook page for a smart magazine, not a press release.
 
 RULES:
-- Total length: 150–250 words
+- Total length: 150-250 words
 - Use 3-5 emojis total, placed naturally in the body (not all at the start)
 - NEVER invent statistics. If no market value given, write qualitative content only.
 - Forbidden words: reshaping, transforming, game-changer, disrupting, revolutionizing
-- FORBIDDEN CHARACTERS: em dash (—), en dash (–). Use a comma or period instead.
-- Plain text only — no markdown, no bold, no labels
+- FORBIDDEN CHARACTERS: em dash, en dash. Use a comma or period instead.
+- Plain text only — no markdown, no bold, no bracket labels like [blank line] or [Opening]
 - Replace {{UTM_URL}} with the exact URL provided in the user message`,
     messages: [
       {
@@ -522,8 +537,16 @@ RULES:
 
   let post = response.content[0].type === 'text' ? response.content[0].text.trim() : '';
 
-  // Post-process: strip any em/en dashes that slipped through
-  post = post.replace(/[—–]/g, ',');
+  // Post-process: strip formatting artifacts that sometimes leak from prompts
+  post = post
+    .replace(/\[blank line\]/gi, '')          // literal "[blank line]" → remove
+    .replace(/\[opening[^\]]*\]/gi, '')        // "[Opening line]" labels → remove
+    .replace(/\[body[^\]]*\]/gi, '')           // "[Body]" labels → remove
+    .replace(/\[hashtag[^\]]*\]/gi, '')        // "[Hashtag]" labels → remove
+    .replace(/\[[^\]]{1,40}\]/g, '')           // any remaining short bracket labels → remove
+    .replace(/[—–]/g, ',')                    // em/en dashes → comma
+    .replace(/\n{3,}/g, '\n\n')               // 3+ blank lines → max 2
+    .trim();
 
   console.log(`   ✅ Facebook post generated (${post.length} chars)`);
   return post;
