@@ -72,12 +72,9 @@ export async function postToLinkedIn(
   const composer = page.locator('div[role="textbox"]').first();
   await composer.click();
 
-  // Write content to clipboard then paste — preserves newlines and special chars
-  await page.evaluate(async (text) => {
-    await navigator.clipboard.writeText(text);
-  }, postText);
+  // Insert text directly — no clipboard, preserves newlines and special chars
   await page.keyboard.press('Control+a');
-  await page.keyboard.press('Control+v');
+  await page.keyboard.insertText(postText);
   await page.waitForTimeout(1500);
 
   // ── Find exact "Post" button ──────────────────────────────────────────────

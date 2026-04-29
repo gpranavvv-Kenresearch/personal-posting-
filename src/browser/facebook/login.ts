@@ -80,11 +80,19 @@ export async function loginToFacebook(options?: {
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
   });
 
+  await browserContext.grantPermissions(['clipboard-read', 'clipboard-write']);
+
   await browserContext.addInitScript(() => {
     Object.defineProperty((globalThis as any).navigator, 'webdriver', { get: () => false });
   });
 
   const page = await browserContext.newPage();
+
+  try {
+    const cdp = await browserContext.newCDPSession(page);
+    const { windowId } = await cdp.send('Browser.getWindowForTarget');
+    await cdp.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'minimized' } });
+  } catch { /* not critical */ }
 
   // Go directly to login page
   await page.goto('https://www.facebook.com/login', {

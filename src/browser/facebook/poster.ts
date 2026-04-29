@@ -41,48 +41,98 @@ export async function postToFacebook(
   await page.click(textAreaSelector);
   await humanDelay(800, 1200);
 
-  console.log('   Typing post...');
-  await page.keyboard.type(postText);
+  console.log('   Pasting post...');
+  await page.keyboard.insertText(postText);
   await humanDelay(1500, 2500);
 
-  // Click the Post button inside the dialog
+  // Click the Post button inside the dialog — try multiple selectors
   console.log('   Clicking Post...');
-  const postButton = page.getByRole('button', { name: /^Post$/ });
-  await postButton.waitFor({ timeout: 10000 });
-  await postButton.click();
-  await humanDelay(5000, 7000);
+  const postBtnSelectors = [
+    page.getByRole('button', { name: /^post$/i }),
+    page.getByRole('button', { name: /^share now$/i }),
+    page.getByRole('button', { name: /^share$/i }),
+  ];
 
-  // Get post URL via Share → Copy Link on the freshly posted item
-  console.log('   Fetching post URL via Share button...');
-  let postUrl = 'https://www.facebook.com/';
+  let posted = false;
+  for (const btn of postBtnSelectors) {
+    try {
+      await btn.waitFor({ timeout: 5000 });
+      await btn.click();
+      posted = true;
+      break;
+    } catch { /* try next */ }
+  }
+  if (!posted) throw new Error('Could not find Post/Share button in Facebook composer dialog.');
 
+  // Wait 8 seconds for post to publish
+  console.log('   Waiting 8s for post to publish...');
+  await humanDelay(8000, 8000);
+
+  let postUrl = '';
+
+  // Strategy 1: find permalink from feed — timestamp <a> links to the post
+  console.log('   Extracting post URL from feed...');
   try {
-    // The newest post appears at the top of the feed — find its Share button
-    const shareBtn = page.locator('[aria-label="Send this to friends or post it on your profile."]').first();
-    await shareBtn.waitFor({ timeout: 10000 });
-    await shareBtn.click();
-    await humanDelay(1000, 1500);
+    postUrl = await page.evaluate((): string => {
+      // Facebook post timestamps are <a> tags whose href is the post permalink
+      const links = Array.from(document.querySelectorAll('a[href]')) as HTMLAnchorElement[];
+      for (const a of links) {
+        const href = a.href || '';
+        if (
+          (href.includes('/posts/') || href.includes('story_fbid') || href.includes('/permalink/')) &&
+          href.includes('facebook.com')
+        ) {
+          return href.split('?')[0]; // strip query params
+        }
+      }
+      return '';
+    });
+    if (postUrl) console.log(`   ✅ Permalink found in DOM: ${postUrl}`);
+  } catch { /* fall through */ }
 
-    // Click "Copy link" in the popup
-    const copyLinkBtn = page.getByRole('menuitem', { name: /copy link/i })
-      .or(page.getByText(/copy link/i).first());
-    await copyLinkBtn.waitFor({ timeout: 5000 });
-    await copyLinkBtn.click();
-    await humanDelay(800, 1200);
+  // Strategy 2: Share button → Copy link (clipboard)
+  if (!postUrl) {
+    const getShareUrl = async (): Promise<string> => {
+      const shareSelectors = [
+        'div[aria-label="Send this to friends or post it on your profile."][role="button"]',
+        'div[aria-label*="Share"][role="button"]',
+        'span[aria-label*="Share"]',
+      ];
+      for (const sel of shareSelectors) {
+        try {
+          await page.locator(sel).first().click({ timeout: 3000 });
+          break;
+        } catch { /* try next */ }
+      }
+      await humanDelay(1000, 1500);
+      await page.locator('span:has-text("Copy link")').first().click({ timeout: 5000 });
+      await humanDelay(800, 1000);
+      return await page.evaluate(() => navigator.clipboard.readText()).catch(() => '');
+    };
 
-    // Read from clipboard
-    postUrl = await page.evaluate(() => navigator.clipboard.readText()).catch(() => '');
-    if (!postUrl || !postUrl.includes('facebook.com')) {
-      postUrl = 'https://www.facebook.com/';
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        console.log(`   Trying Share → Copy link (attempt ${attempt}/3)...`);
+        const copied = await getShareUrl();
+        if (copied && (copied.includes('/posts/') || copied.includes('story_fbid') || copied.includes('facebook.com'))) {
+          postUrl = copied;
+          console.log(`   ✅ URL from clipboard: ${postUrl}`);
+          break;
+        }
+        await humanDelay(2000, 3000);
+      } catch (err: any) {
+        console.log(`   ⚠️ Attempt ${attempt} failed: ${err.message?.slice(0, 80)}`);
+        await humanDelay(2000, 3000);
+      }
     }
-    console.log(`   Post URL: ${postUrl}`);
-  } catch {
-    console.log('   Could not get post URL via Share button — using fallback');
   }
 
+  console.log(`   Post URL: ${postUrl || '(not captured)'}`);
+
+  // Post was published even if URL capture failed — return success with whatever URL we have
   return {
     success: true,
-    postUrl,
+    postUrl: postUrl || 'https://www.facebook.com/',
     postText,
     postedAt: new Date(),
   };

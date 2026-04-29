@@ -2,9 +2,13 @@ node_modules/
 .env
 .sessions/
 li-sessions/
-.accounts/google-service-account.json
-.accounts/accounts.json
-.accounts/facebook-accounts.json
-.accounts/linkedin-accounts.json
+.accounts/
 dist/
 *.log
+.claude/
+.playwright-mcp/
+.vscode/
+debug/
+logs/.monitor-state.json
+logs/error-kb.json
+logs/human-alerts.json

@@ -1,12 +1,17 @@
-import { chromium, BrowserContext, Page } from 'playwright';
+import { chromium, Browser, BrowserContext, Page } from 'playwright';
 import { humanDelay } from '../stagehand.js';
 import { Account } from '../../config/accounts.js';
+import { ChildProcess, spawn } from 'child_process';
+import net from 'net';
 import path from 'path';
 import fs from 'fs';
 import 'dotenv/config';
+import { killChromeForProfile } from '../../utils/killChrome.js';
 
 let browserContext: BrowserContext | null = null;
 let loginPage: Page | null = null;
+let browser: Browser | null = null;
+let chromeProcess: ChildProcess | null = null;
 
 export async function closeBrowser() {
   if (browserContext) {
@@ -15,84 +20,271 @@ export async function closeBrowser() {
     } catch { /* already closed */ }
     browserContext = null;
     loginPage = null;
-    console.log('   Browser closed.');
   }
+
+  if (browser) {
+    try {
+      await browser.close();
+    } catch { /* already closed */ }
+    browser = null;
+  }
+
+  if (chromeProcess) {
+    try {
+      chromeProcess.kill();
+    } catch { /* already closed */ }
+    chromeProcess = null;
+  }
+
+  console.log('   Browser closed.');
 }
 
 const SESSION_DIR = path.resolve('.sessions/chrome-profile');
 
-export async function loginToX(account?: Account): Promise<Page> {
-  // Close any existing browser before opening a new one (prevents two browsers from appearing)
-  if (browserContext) {
-    console.log('   Closing existing browser before opening new one...');
-    await closeBrowser();
+async function hasLoggedInXUi(page: Page): Promise<boolean> {
+  const loggedInSelectors = [
+    '[data-testid="SideNav_NewTweet_Button"]',
+    '[data-testid="tweetButtonInline"]',
+    'a[href="/compose/tweet"]',
+    'a[data-testid="AppTabBar_Home_Link"]',
+  ];
+
+  for (const selector of loggedInSelectors) {
+    const visible = await page.locator(selector).first().isVisible({ timeout: 1500 }).catch(() => false);
+    if (visible) return true;
   }
 
-  console.log('   Launching stealth browser...');
+  return false;
+}
 
-  const sessionDir = account?.sessionDir ? path.resolve(account.sessionDir) : SESSION_DIR;
-  const username = account?.username || process.env.X_USERNAME!;
-  const password = account?.password || process.env.X_PASSWORD!;
+async function saveXLoginDebug(page: Page, handle: string, step: string): Promise<string> {
+  const outDir = path.resolve('debug', `x-login-${handle}`);
+  fs.mkdirSync(outDir, { recursive: true });
+  await page.screenshot({ path: path.join(outDir, `${step}.png`), fullPage: true }).catch(() => {});
+  fs.writeFileSync(path.join(outDir, `${step}.html`), await page.content().catch(() => ''), 'utf8');
+  return outDir;
+}
 
+async function getFreePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address();
+      if (!address || typeof address === 'string') {
+        server.close(() => reject(new Error('Could not allocate a local CDP port')));
+        return;
+      }
+      const port = address.port;
+      server.close(() => resolve(port));
+    });
+  });
+}
+
+async function waitForCdp(port: number): Promise<void> {
+  const endpoint = `http://127.0.0.1:${port}/json/version`;
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < 15000) {
+    try {
+      const response = await fetch(endpoint);
+      if (response.ok) return;
+    } catch {
+      // Chrome is still starting.
+    }
+    await new Promise(resolve => setTimeout(resolve, 300));
+  }
+
+  throw new Error(`Chrome CDP endpoint did not start on port ${port}`);
+}
+
+async function launchFreshChrome(handle: string): Promise<{ browser: Browser; context: BrowserContext; page: Page }> {
   const chromePath = process.env.CHROME_PATH || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
   if (!fs.existsSync(chromePath)) {
     throw new Error(`Chrome not found at ${chromePath}. Set CHROME_PATH env var to your chrome.exe path.`);
   }
 
-  browserContext = await chromium.launchPersistentContext(sessionDir, {
-    headless: false,
-    executablePath: chromePath,
-    slowMo: 50,
-    ignoreDefaultArgs: ['--enable-automation'],
-    args: [
-      '--no-sandbox',
-      '--start-maximized',
-      '--disable-blink-features=AutomationControlled',
-      '--disable-renderer-backgrounding',
-      '--disable-background-timer-throttling',
-      '--disable-backgrounding-occluded-windows',
-      '--no-first-run',
-      '--no-default-browser-check',
-      '--disable-session-crashed-bubble',
-      '--disable-infobars',
-    ],
-    viewport: { width: 1280, height: 800 },
-    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  const port = await getFreePort();
+  const profileDir = path.resolve('.sessions', `fresh-chrome-${handle}-${Date.now()}`);
+  fs.mkdirSync(profileDir, { recursive: true });
+
+  chromeProcess = spawn(chromePath, [
+    `--remote-debugging-port=${port}`,
+    `--user-data-dir=${profileDir}`,
+    '--new-window',
+    'about:blank',
+  ], {
+    detached: false,
+    stdio: 'ignore',
   });
 
-  await browserContext.grantPermissions(['clipboard-read', 'clipboard-write']);
+  await waitForCdp(port);
 
-  await browserContext.addInitScript(() => {
-    Object.defineProperty((globalThis as any).navigator, 'webdriver', { get: () => false });
-  });
+  const connectedBrowser = await chromium.connectOverCDP(`http://127.0.0.1:${port}`);
+  const context = connectedBrowser.contexts()[0];
+  const pages = context.pages();
+  const page = pages[0] || await context.newPage();
 
-  // Reuse first existing page (persistent context restores previous session tabs)
-  const existingPages = browserContext.pages();
-  if (existingPages.length > 0) {
-    loginPage = existingPages[0];
-    for (const p of existingPages.slice(1)) {
-      await p.close().catch(() => {});
+  return { browser: connectedBrowser, context, page };
+}
+
+function getSessionStatePath(account?: Account): string | null {
+  const candidate =
+    account?.sessionStatePath ||
+    account?.storageState ||
+    (account?.sessionDir?.toLowerCase().endsWith('.json') ? account.sessionDir : undefined);
+
+  return candidate ? path.resolve(candidate) : null;
+}
+
+function getSessionProfileDir(account?: Account): string {
+  return account?.sessionDir && !account.sessionDir.toLowerCase().endsWith('.json')
+    ? path.resolve(account.sessionDir)
+    : SESSION_DIR;
+}
+
+async function launchSavedSessionChrome(account: Account | undefined, handle: string): Promise<Page | null> {
+  const chromePath = process.env.CHROME_PATH || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+  const statePath = getSessionStatePath(account);
+
+  if (statePath) {
+    if (!fs.existsSync(statePath)) {
+      console.warn(`   X storage-state JSON not found: ${statePath}`);
+      return null;
     }
-  } else {
+
+    console.log(`   Using X storage-state JSON: ${statePath}`);
+    browser = await chromium.launch({
+      headless: false,
+      executablePath: fs.existsSync(chromePath) ? chromePath : undefined,
+      channel: fs.existsSync(chromePath) ? undefined : 'chrome',
+      slowMo: 50,
+      ignoreDefaultArgs: ['--enable-automation', '--no-sandbox'],
+      args: ['--disable-blink-features=AutomationControlled'],
+    });
+    browserContext = await browser.newContext({
+      storageState: statePath,
+      viewport: { width: 1280, height: 900 },
+    });
+    await browserContext.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: 'https://x.com' }).catch(() => {});
     loginPage = await browserContext.newPage();
+  } else {
+    const sessionDir = getSessionProfileDir(account);
+    if (!fs.existsSync(sessionDir)) {
+      console.warn(`   X session folder not found: ${sessionDir}`);
+      return null;
+    }
+
+    killChromeForProfile(sessionDir);
+
+    console.log(`   Using X session folder: ${sessionDir}`);
+    browserContext = await chromium.launchPersistentContext(sessionDir, {
+      headless: false,
+      executablePath: fs.existsSync(chromePath) ? chromePath : undefined,
+      channel: fs.existsSync(chromePath) ? undefined : 'chrome',
+      slowMo: 50,
+      ignoreDefaultArgs: ['--enable-automation', '--no-sandbox'],
+      viewport: { width: 1280, height: 900 },
+      args: [
+        '--no-sandbox',
+        '--disable-blink-features=AutomationControlled',
+        '--disable-renderer-backgrounding',
+        '--disable-background-timer-throttling',
+        '--disable-backgrounding-occluded-windows',
+        '--no-first-run',
+        '--no-default-browser-check',
+        '--disable-session-crashed-bubble',
+        '--disable-infobars',
+      ],
+    });
+    await browserContext.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: 'https://x.com' }).catch(() => {});
+    const pages = browserContext.pages();
+    loginPage = pages[0] || await browserContext.newPage();
   }
-  console.log('   Browser launched!');
 
-  // Go to /home first — session check
+  loginPage.on('dialog', async (dialog) => {
+    console.warn(`   Dialog dismissed: ${dialog.type()} ${dialog.message()}`);
+    await dialog.dismiss().catch(() => {});
+  });
+
   await loginPage.goto('https://x.com/home', { waitUntil: 'domcontentloaded', timeout: 60000 });
-  await humanDelay(3000, 5000);
+  await humanDelay(2500, 3500);
 
-  const urlAfterHome = loginPage.url();
-  console.log(`   URL after goto /home: ${urlAfterHome}`);
-
-  // Already logged in
-  if (!urlAfterHome.includes('/flow/login') && !urlAfterHome.includes('/login')) {
-    console.log('   Already logged in!');
-    console.log('✅ Login done!');
+  if (await hasLoggedInXUi(loginPage)) {
+    console.log(`   X session is logged in for ${handle}`);
     return loginPage;
   }
 
-  console.log('   Not logged in — starting login flow...');
+  console.warn(`   X saved session is not logged in for ${handle}`);
+  await closeBrowser().catch(() => {});
+  return null;
+}
+
+/**
+ * Returns true if the session directory exists and has at least one cookie/storage file.
+ * A missing or empty session dir means the account was never logged in — throw immediately
+ * so the batch can write a human-review-login alert without launching Chrome.
+ */
+export function isSessionReady(account?: Account): boolean {
+  const statePath = getSessionStatePath(account);
+  if (statePath) return fs.existsSync(statePath);
+
+  const sessionDir = getSessionProfileDir(account);
+  if (!fs.existsSync(sessionDir)) return false;
+  // Playwright stores cookies in "Default/Cookies" (Chrome) or "Default/Network/Cookies"
+  const cookiesPath1 = path.join(sessionDir, 'Default', 'Cookies');
+  const cookiesPath2 = path.join(sessionDir, 'Default', 'Network', 'Cookies');
+  return fs.existsSync(cookiesPath1) || fs.existsSync(cookiesPath2);
+}
+
+export async function loginToX(account?: Account): Promise<Page> {
+  // Close any existing browser before opening a new one (prevents two browsers from appearing)
+  if (browserContext || browser) {
+    console.log('   Closing existing browser before opening new one...');
+    await closeBrowser();
+  }
+
+  const username = account?.username || process.env.X_USERNAME!;
+  const password = account?.password || process.env.X_PASSWORD!;
+  const handle = account?.handle || process.env.X_HANDLE || username;
+
+  console.log('   Checking saved X session...');
+  const sessionPage = await launchSavedSessionChrome(account, handle).catch(async (err: any) => {
+    console.warn(`   Saved X session failed: ${err.message}`);
+    await closeBrowser().catch(() => {});
+    return null;
+  });
+  if (sessionPage) return sessionPage;
+
+  if (!username || !password) {
+    throw new Error(`X_CREDENTIALS_MISSING:${handle} — account username/password or X_USERNAME/X_PASSWORD env vars are required`);
+  }
+
+  console.log('   Launching fresh real Chrome...');
+
+  // Start Google Chrome as a normal process, then attach over CDP. This avoids
+  // Playwright's normal launch-time browser flags while still giving us a Page.
+  const launched = await launchFreshChrome(handle);
+  browser = launched.browser;
+  browserContext = launched.context;
+
+  browserContext.on('page', async (newPage) => {
+    if (!loginPage || newPage === loginPage) return;
+    console.warn(`   Closing unexpected new tab: ${newPage.url()}`);
+    await newPage.close().catch(() => {});
+  });
+
+  loginPage = launched.page;
+  loginPage.on('dialog', async (dialog) => {
+    console.warn(`   Dialog dismissed: ${dialog.type()} ${dialog.message()}`);
+    await dialog.dismiss().catch(() => {});
+  });
+
+  console.log('   Browser launched!');
+
+  console.log('   Opening X login flow...');
+  await loginPage.goto('https://x.com/i/flow/login', { waitUntil: 'domcontentloaded', timeout: 60000 });
+  await humanDelay(2000, 3000);
 
   // Fill username
   console.log('   Typing username...');
@@ -100,11 +292,15 @@ export async function loginToX(account?: Account): Promise<Page> {
   await userInput.waitFor({ state: 'visible', timeout: 30000 });
   await userInput.click();
   await humanDelay(400, 700);
-  await userInput.fill(username);
+  await userInput.fill('');
+  await humanDelay(200, 300);
+  await userInput.type(username, { delay: 30 });
   await humanDelay(800, 1200);
 
   // Click Next button (fallback to Enter)
-  const nextButton = loginPage.locator('div[role="button"]:has-text("Next"), button[role="button"]:has-text("Next")');
+  const nextButton = loginPage.locator(
+    '[data-testid="LoginForm_Login_Button"], div[role="button"]:has-text("Next"), button[role="button"]:has-text("Next")'
+  );
   if (await nextButton.first().isVisible().catch(() => false)) {
     await nextButton.first().click();
   } else {
@@ -113,15 +309,37 @@ export async function loginToX(account?: Account): Promise<Page> {
   await humanDelay(2000, 3000);
   console.log(`   URL after username: ${loginPage.url()}`);
 
-  // Security check (unusual activity — enter username again)
+  const passwordVisibleAfterUsername = await loginPage.locator('input[name="password"]').first()
+    .isVisible({ timeout: 3000 })
+    .catch(() => false);
+  const verificationVisibleAfterUsername = await loginPage.locator('input[data-testid="ocfEnterTextTextInput"]').first()
+    .isVisible({ timeout: 3000 })
+    .catch(() => false);
+  const usernameStillVisible = await loginPage.locator('input[name="text"], input[autocomplete="username"]').first()
+    .isVisible({ timeout: 1000 })
+    .catch(() => false);
+
+  if (!passwordVisibleAfterUsername && !verificationVisibleAfterUsername && usernameStillVisible) {
+    const debugDir = await saveXLoginDebug(loginPage, handle, 'username-step-stuck');
+    throw new Error(
+      `X_USERNAME_STEP_STUCK:${handle} — X stayed on the username screen after Next. ` +
+      `Manual login is required. Debug saved at ${debugDir}`
+    );
+  }
+
+  // Security check / verification step — X often asks for the handle here.
   try {
     const sec = loginPage.locator('input[data-testid="ocfEnterTextTextInput"]');
-    if (await sec.isVisible({ timeout: 3000 })) {
+    if (await sec.isVisible({ timeout: 10000 })) {
       console.log('   Security check...');
       await sec.click();
-      await sec.fill(username);
+      await sec.fill('');
+      await humanDelay(200, 300);
+      await sec.type(handle, { delay: 30 });
       await humanDelay(800, 1200);
-      const secNext = loginPage.locator('div[role="button"]:has-text("Next"), button:has-text("Next")');
+      const secNext = loginPage.locator(
+        '[data-testid="ocfEnterTextNextButton"], div[role="button"]:has-text("Next"), button:has-text("Next")'
+      );
       if (await secNext.first().isVisible().catch(() => false)) {
         await secNext.first().click();
       } else {
@@ -134,10 +352,32 @@ export async function loginToX(account?: Account): Promise<Page> {
   // Fill password
   console.log('   Typing password...');
   const passInput = loginPage.locator('input[name="password"]').first();
+  if (!await passInput.isVisible({ timeout: 10000 }).catch(() => false)) {
+    const verifyAgain = loginPage.locator('input[data-testid="ocfEnterTextTextInput"]').first();
+    if (await verifyAgain.isVisible({ timeout: 5000 }).catch(() => false)) {
+      console.log('   Verification step before password...');
+      await verifyAgain.click();
+      await verifyAgain.fill('');
+      await humanDelay(200, 300);
+      await verifyAgain.type(handle, { delay: 30 });
+      await humanDelay(800, 1200);
+      const verifyNext = loginPage.locator(
+        '[data-testid="ocfEnterTextNextButton"], div[role="button"]:has-text("Next"), button:has-text("Next")'
+      );
+      if (await verifyNext.first().isVisible().catch(() => false)) {
+        await verifyNext.first().click();
+      } else {
+        await loginPage.keyboard.press('Enter');
+      }
+      await humanDelay(2000, 3000);
+    }
+  }
   await passInput.waitFor({ state: 'visible', timeout: 30000 });
   await passInput.click();
   await humanDelay(400, 700);
-  await passInput.fill(password);
+  await passInput.fill('');
+  await humanDelay(200, 300);
+  await passInput.type(password, { delay: 30 });
   await humanDelay(800, 1200);
 
   // Click Log in button (fallback to Enter)
@@ -155,9 +395,13 @@ export async function loginToX(account?: Account): Promise<Page> {
     if (await verifyInput.isVisible({ timeout: 3000 })) {
       console.log('   Phone/email verification challenge...');
       await verifyInput.click();
-      await verifyInput.fill(username);
+      await verifyInput.fill('');
+      await humanDelay(200, 300);
+      await verifyInput.type(handle, { delay: 30 });
       await humanDelay(800, 1200);
-      const verifyNext = loginPage.locator('div[role="button"]:has-text("Next"), button:has-text("Next")');
+      const verifyNext = loginPage.locator(
+        '[data-testid="ocfEnterTextNextButton"], div[role="button"]:has-text("Next"), button:has-text("Next")'
+      );
       if (await verifyNext.first().isVisible().catch(() => false)) {
         await verifyNext.first().click();
       } else {
@@ -175,6 +419,13 @@ export async function loginToX(account?: Account): Promise<Page> {
     );
   } catch {
     console.log('   ⚠️  Still on login page — may need manual intervention');
+  }
+
+  if (!await hasLoggedInXUi(loginPage)) {
+    const debugDir = await saveXLoginDebug(loginPage, handle, 'login-not-confirmed');
+    throw new Error(
+      `X_LOGIN_NOT_CONFIRMED:${handle} — logged-in X UI was not detected. Debug saved at ${debugDir}`
+    );
   }
 
   console.log(`   URL after login: ${loginPage.url()}`);

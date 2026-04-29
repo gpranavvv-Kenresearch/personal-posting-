@@ -11,8 +11,10 @@
     "accounts:add": "node --import=tsx src/config/accounts.ts add",
     "accounts:list": "node --import=tsx src/config/accounts.ts list",
     "login": "node --import=tsx src/login-account.ts",
+    "login:x": "node --import=tsx src/tools/loginX.ts",
     "fb-post": "node --import=tsx src/index.ts fb-post",
-    "linkedin-post": "node --import=tsx src/index.ts linkedin-post"
+    "linkedin-post": "node --import=tsx src/index.ts linkedin-post",
+    "tracker": "node --import=tsx src/index.ts tracker"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",

@@ -19,6 +19,8 @@ export interface XAccount {
   username: string;
   password: string;
   sessionDir: string;
+  sessionStatePath?: string;
+  storageState?: string;
   nickname?: string;
   active: boolean;
 }

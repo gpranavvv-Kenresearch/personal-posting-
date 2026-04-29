@@ -1,452 +1,523 @@
-# Product Requirements Document (PRD)
-## X Posting Agent - Automated Social Media Distribution System
+# Product Requirements Document
+## Ken Research — Automated Content Distribution Agent
 
-**Version:** 2.0
-**Date:** March 26, 2026
-**Status:** Production Ready
-**Future Expansion:** Micro blog platforms (HackMD, Hashnode, Google Sites, Medium, Dev.to) & PR distribution websites
-
----
-
-## 📋 Executive Summary
-
-The **X Posting Agent** is an intelligent automation system that takes content from Ken Research blog articles and automatically posts them across multiple social media platforms (X/Twitter, Facebook, LinkedIn) while strategically managing 15 accounts per platform. The system uses AI-powered content generation and smart scheduling to maximize reach and engagement without violating rate limits or platform policies.
-
-Think of it as a **smart content distribution robot** that reads blog articles, understands their value, breaks them down into platform-specific messages, and posts them at the right time to the right accounts.
+**Version:** 3.0
+**Date:** April 17, 2026
+**Status:** Production
 
 ---
 
-## 🎯 Core Problem & Solution
+## 1. Overview
 
-**The Problem:**
-- Ken Research writes valuable blog articles that deserve wider audience
-- Manually posting to 45 social accounts (15 on X, 15 on Facebook, 15 on LinkedIn) is time-consuming
-- Different platforms need different content formats (280 chars for X, longer posts for FB/LinkedIn)
-- Need to maintain consistent posting schedule without hitting platform rate limits
-- Need to track which URLs have been posted and when
-- Articles that rank well should be reposted after a week
+The Ken Research Content Distribution Agent is a fully autonomous system that takes blog articles from a Google Sheet and distributes them across **12 platforms** — 3 social media platforms and 9 blog/content platforms. It handles SEO analysis, AI content generation, browser-based posting, error detection, and self-healing without human intervention during operation.
 
-**Our Solution:**
-An autonomous system that:
-- ✅ Reads blog URLs from a Google Sheet
-- ✅ Analyzes their SEO value using Google Search API
-- ✅ Automatically generates platform-specific content (tweet, Facebook post, LinkedIn post, blog)
-- ✅ Posts to 45 accounts sequentially (no conflicts)
-- ✅ Respects platform limits (X: 195/day, FB: 75/day, LinkedIn: 45/day)
-- ✅ Re-checks article rankings after 7 days and reposts if still valuable
-- ✅ Handles errors automatically (detects popups, fixes broken selectors)
+**Daily throughput: ~674 posts/day**
 
 ---
 
-## 🏗️ Architecture Overview
+## 2. Problem Statement
 
-### **High-Level Flow:**
+Ken Research publishes high-value market research articles that need broad online distribution to maximize SEO backlinks and audience reach. Manually posting across 12 platforms and 45 accounts is not feasible. The system must:
+
+- Distribute content at scale across all platforms every day
+- Generate platform-appropriate content for each destination
+- Detect and recover from browser/login/API errors without stopping
+- Learn from errors so the same issue never requires human intervention twice
+- Repost valuable content weekly using fresh angles
+
+---
+
+## 3. System Architecture
 
 ```
-Blog URL (from Google Sheet)
-    ↓
-[SEO Agent] → Check Google ranking → Assign priority (P1/P2/P3)
-    ↓
-[Content Agent] → Generate 4 posts (Tweet, FB, LinkedIn, Blog)
-    ↓
-[Posting Agents] → Post to 45 accounts sequentially
-    ↓
-[Sheet Update] → Record URLs, status, results
-    ↓
-[Week 2+] → Re-check ranking → Regenerate content → Repost if valuable
-```
-
-### **System Components:**
-
-#### **1. Scheduler (Daemon)**
-- Runs every 30 minutes during 11 AM - 6 PM IST (posting window)
-- Checks daily limits (X: 195, FB: 75, LinkedIn: 45)
-- Respects cooldowns (X: 30 min, FB: 1 hr, LinkedIn: 2 hrs)
-- Saturday 10 PM: Triggers weekly SERP re-check for old URLs
-
-#### **2. SEO Agent (Claude AI)**
-- Searches Google with SerpAPI to find article ranking
-- Determines: Is article on page 1-2? Page 3-4? Below page 4 or not indexed?
-- Assigns priority:
-  - **P1** (Rank 1-30): Post every day to all platforms
-  - **P2** (Rank 31-69): Post alternate days (Mon/Wed/Fri)
-  - **P3** (Rank 70+ or not indexed): Post Mon-Sat only
-
-#### **3. Content Agent (Claude AI)**
-- Reads the blog URL content
-- Generates 4 different posts:
-  - **Tweet:** 280 characters max, engaging, with hashtags
-  - **Facebook Post:** Conversational, emoji-friendly, encouraging engagement
-  - **LinkedIn Post:** Professional tone, B2B focused, thought leadership
-  - **Blog Post:** 600-800 words, deep dive, shareable insights
-- Validates tweet meets length requirements
-- Runs sanity check (detects gibberish, checks tone)
-
-#### **4. Posting Agents (Playwright Browser Automation)**
-- **X Agent:** Logs in, posts tweet, captures URL
-- **Facebook Agent:** Logs in, posts to 15 FB accounts sequentially
-- **LinkedIn Agent:** Logs in, posts to 15 LinkedIn accounts sequentially
-- Each account opens fresh browser, posts, closes (no parallel conflicts)
-
-#### **5. Coordinator (Master Brain)**
-- Decides which platform batch to run next
-- Tracks daily usage per platform
-- Manages cooldown timers
-- Detects and removes popups automatically
-- Fixes broken selectors by reading code and suggesting fixes
-- Retries failed batches up to 3 times
-
-#### **6. Google Sheets Integration**
-- **Read:** Blog URLs, titles, priority hints
-- **Write:** SEO rankings, priority levels, generated posts, post URLs, status
-- Single "insta" tab stores everything
-
----
-
-## 📊 Data Model
-
-### **What Gets Tracked (Sheet Columns):**
-
-```
-URL Information:
-  • targetUrl - The blog link
-  • title - Article title
-  • marketValue - Market size mentioned in article
-
-SEO Data:
-  • seoRanking - Google search rank (1, 2, 55, 100+, N/A)
-  • seoIndexed - Is article in Google index? (yes/no/unknown)
-  • seoPage - Which Google result page? (1, 2, 3, 4, 5+)
-  • seoKeywords - Keywords article ranks for
-  • priority - P1 / P2 / P3 (stays valid 7 days)
-  • lastSerpCheckDate - When we last checked Google ranking
-
-Generated Content:
-  • X Post - Generated tweet text
-  • FB Post - Generated Facebook post text
-  • LinkedIn Post - Generated LinkedIn post text
-  • Message Status - Generated blog post draft
-
-Posting Results:
-  • X Post URL - Link to posted tweet
-  • FB Post URL - Link to posted FB post
-  • LinkedIn Post URL - Link to posted LinkedIn post
-  • X Status / FB Status / LinkedIn Status - Posted / Failed
-  • X Error / FB Error / LinkedIn Error - Why it failed (if failed)
-
-Metadata:
-  • lastPostedX - When last posted to X
-  • lastPostedFb - When last posted to FB
-  • lastPostedLi - When last posted to LinkedIn
-  • date - When added to system
-  • batch - Which posting batch
+Google Sheet (source of truth)
+        ↓
+[Scheduler — node-cron, Asia/Kolkata]
+        ↓
+[Master Coordinator — per-platform batch runners]
+        ↓                     ↓                     ↓
+[SEO Agent]          [Content Agent]        [Browser Agents]
+ SerpAPI/Zenserp/     Claude AI              Playwright
+ Serpstack             per platform           per platform
+        ↓                     ↓                     ↓
+[Google Sheets — write back results, URLs, status, errors]
+        ↓
+[Error Interceptor → Error KB → Auto-Fix → Monitor]
+        ↓
+[Claude CLI /loop — human-review-code fixes only]
 ```
 
 ---
 
-## ⏰ Weekly Schedule
+## 4. Platforms
 
-### **Week 1 (Monday):**
+### 4.1 Social Media
+
+| Platform | Accounts | Batches/Day | Posts/Day | Schedule (IST) |
+|----------|----------|-------------|-----------|----------------|
+| X (Twitter) | 15 | 9 | 135 | 11:00, 12:00, 12:30, 13:30, 14:30, 15:00, 15:30, 16:30, 17:00 |
+| Facebook | 13 | 5 | 65 | 11:30, 12:30, 13:30, 14:30, 15:30 |
+| LinkedIn | 15 | 3 | 45 | 11:30, 13:30, 15:30 |
+
+### 4.2 Blog/Content Platforms — Wave 1 (11:30–13:30 IST)
+
+| Platform | Batches/Day | Posts/Day | Time (IST) |
+|----------|-------------|-----------|------------|
+| Google Sites | 2 | 32 | 11:30 (FIRST — sets P1/P2/P3) |
+| HackMD | 2 | 30 | 11:45 |
+| Linkmate | 2 | 30 | 12:00 |
+| Guffiz | 2 | 30 | 12:15 |
+| Calisthenics | 2 | 2 | 12:30 |
+| Substack | 1 | 15 | 12:45 |
+| Dev.to | 1 | 15 | 13:00 |
+| LinkedIn Pulse | 1 | 15 | 13:15 |
+| Medium | 1 | 15 | 13:30 |
+
+### 4.3 Blog/Content Platforms — Wave 2 (14:30–15:30 IST)
+
+| Platform | Time (IST) |
+|----------|------------|
+| Google Sites Batch 2 | 14:30 (FIRST) |
+| HackMD Batch 2 | 14:45 |
+| Linkmate Batch 2 | 15:00 |
+| Guffiz Batch 2 | 15:15 |
+| Calisthenics Batch 2 | 15:30 |
+
+**Google Sites always runs FIRST in each wave** — it sets P1/P2/P3 SEO priority that all other blog platforms read.
+
+### 4.4 Daily Totals
+
+| Category | Posts/Day |
+|----------|-----------|
+| Social (X + FB + LI) | 245 |
+| Blog platforms | ~429 |
+| **Grand Total** | **~674** |
+
+---
+
+## 5. Data Model (Google Sheet — "insta" tab)
+
+### Input Columns (user-populated)
+
+| Column | Description |
+|--------|-------------|
+| `targetUrl` | Ken Research blog URL |
+| `title` | Article title |
+| `marketValue` | Market size mentioned in article |
+| `name` | X/FB/LI account handle to post from |
+
+### SEO Columns (system-written by SEO Agent)
+
+| Column | Description |
+|--------|-------------|
+| `seoRanking` | Google search rank number |
+| `seoIndexed` | yes / no / unknown |
+| `seoPage` | Google result page (1, 2, 3, 4, 5+) |
+| `priority` | P1 / P2 / P3 |
+| `lastSerpCheckDate` | Date of last SERP check (YYYY-MM-DD) |
+
+### Content Columns (system-written by Content Agent)
+
+| Column | Description |
+|--------|-------------|
+| `xPost` | Generated tweet text |
+| `fbPost` | Generated Facebook post |
+| `liPost` | Generated LinkedIn post |
+| `googleSitePost` | Google Sites article content |
+| `hackmdPost` | HackMD article content |
+| `mediumPost` | Medium article content |
+| `substackPost` | Substack newsletter content |
+| `guffizPost` | Guffiz article content |
+| `devtoPost` | Dev.to article content |
+| `linkedinPulsePost` | LinkedIn Pulse article content |
+| `linkmatePost` | Linkmate post content |
+| `calisthenicsPost` | Calisthenics blog content |
+
+### Result Columns (system-written per platform)
+
+| Column | Description |
+|--------|-------------|
+| `xPostUrl` | URL of posted tweet |
+| `xStatus` | Posted / Failed / Error |
+| `xError` | Error message if failed |
+| `xBatch` | Batch number (e.g. "Batch 5") |
+| `fbPostUrl` | URL of posted Facebook post |
+| `fbStatus` / `fbError` / `fbBatch` | Same pattern |
+| `liPostUrl` | URL of posted LinkedIn post |
+| `liStatus` / `liError` / `liBatch` | Same pattern |
+| *(same for medium, hackmd, substack, devto, guffiz, linkmate, googlesite, linkedinpulse, calisthenics)* | |
+
+---
+
+## 6. Agent Pipeline (per batch)
+
+### 6.1 X Batch Flow
+
 ```
-MON: P1 URLs post (all 15 X accounts)
-TUE: P1 URLs post
-WED: P1 URLs post + P2 URLs post
-THU: P1 URLs post
-FRI: P1 URLs post + P2 URLs post
-SAT: P1 URLs post + P3 URLs post
-SUN: P1 URLs post (P3 skip Sunday)
+1. getRowsForContinuousXPosting(15) — repost-eligible rows (P1 daily, P2 alt days, P3 Mon-Sat)
+2. Fill remaining slots from getUnassignedRowsAsSheetRows()
+3. For each row:
+   a. runSeoAnalysis() → rank + priority → saveUnifiedSeoData()
+   b. generateTweet() → Claude AI (230 char limit)
+   c. runXAgent() → Playwright browser post
+   d. If TWEET_OVER_LIMIT:N → regenerate with tighter limit (up to 3 attempts)
+   e. savePostingResult() → write URL + status + batch to sheet
+   f. If exception → recordError() → applyFix() → save error to sheet
 ```
 
-### **Week 2 (Saturday 10 PM):**
+### 6.2 FB / LI Batch Flow
+
 ```
-Automatic SERP re-check for URLs from Week 1:
-- Article still ranking well? → Keep priority, allow reposting
-- Article dropped in ranking? → Update priority
-- Priority changed? → Generate NEW content
-- Clear old posting URLs → Allow re-selection for Week 2
+1. getRowsForContinuousFbPosting(15) or LI equivalent
+2. Fill from unassigned rows
+3. For each row:
+   a. Read SEO data already written by X batch (no re-analysis)
+   b. generateFbPost() / generateLiPost() → Claude AI
+   c. Browser post via Playwright
+   d. saveFbBatchResult() / saveLiBatchResult()
+   e. Error handling → KB → auto-fix
 ```
 
-### **Week 2+ (Continuous):**
+### 6.3 Blog Platform Batch Flow
+
 ```
-FB/LI batch posting continues sequentially:
-- Batch 1: Rows 1-15
-- Batch 2: Rows 16-30
-- Batch 3: Rows 31-45
-(No daily reset - continuous week-long posting)
+1. getRowsForContinuous[Platform]Posting(15 or 16)
+2. For each row:
+   a. Read SEO priority from sheet (set by Google Sites batch)
+   b. generate[Platform]Post() → Claude AI (long-form content)
+   c. Browser automation → post on platform
+   d. save[Platform]Result() → URL + status + batch
+   e. Error handling → KB → auto-fix
 ```
 
 ---
 
-## 🤖 How AI Brain Works
+## 7. SEO Agent
 
-### **Claude AI Decision Loop:**
+**Provider rotation:** Round-robin across 3 providers — SerpAPI, Zenserp, Serpstack. State persisted in `.sessions/provider-rotation.json`. Rotates after every call (success or failure). 403 is treated as exhausted (same as 401/429).
 
-Every agent follows same pattern:
+**Priority assignment:**
+
+| Rank | Priority | Posting frequency |
+|------|----------|-------------------|
+| 1–30 (Page 1–3) | P1 | Every day |
+| 31–69 (Page 4–7) | P2 | Alternate days (Mon/Wed/Fri) |
+| 70+ or not indexed | P3 | Mon–Sat only |
+
+**Weekly recheck:** Saturday 22:00 IST — re-runs SERP for all URLs older than 7 days. Updates priority. If priority changed, generates fresh content.
+
+---
+
+## 8. Content Agent
+
+All content generated by Claude AI (`claude-opus-4-6`).
+
+**Tweet generation:**
+- Base limit: 230 characters (leaves buffer for X's URL shortening)
+- If `TWEET_OVER_LIMIT:N` thrown by poster → regenerate with `230 - N` character limit
+- Up to 3 regeneration attempts
+- Unique content per URL: past tweets stored in `.sessions/tweet-history.json` (max 5 per URL) and injected into prompt as "DO NOT reuse" list
+- Angle, CTA, and structure must differ each time same URL is reposted
+
+**Blog content:**
+- Long-form, 600–1200 words depending on platform
+- Platform-specific tone (technical for Dev.to/HackMD, professional for LinkedIn Pulse, conversational for Medium/Substack)
+
+---
+
+## 9. Error Detection & Self-Healing
+
+### 9.1 Error Knowledge Base (`logs/error-kb.json`)
+
+Every error is normalized (timestamps/IDs stripped), hashed, and stored with:
+
 ```
-1. Receive task (URL to analyze / content to generate / tweet to post)
-2. Call tools as needed (search API / browser action / sheet read)
-3. Process results
-4. Make decision based on results
-5. Report back with success/failure + details
-6. Loop if needed (for retries)
+id                  — SHA-256 hash of normalized pattern (first 8 chars)
+normalizedPattern   — stable error string for deduplication
+rawSamples          — last 3 actual error messages
+platform            — which platform failed
+classification      — RETRYABLE / NEEDS_HUMAN / FATAL / FIXABLE
+count               — how many times seen
+auto_resolvable     — can code fix this without human?
+auto_trusted        — true after 3 successful fixes (fully autonomous)
+resolution_type     — action to take
+worked_count        — successful fix applications
+failed_count        — failed fix applications
+diagnosis           — Claude-generated 1-2 sentence fix suggestion
 ```
 
-**Example - SEO Agent Loop:**
+### 9.2 Resolution Types
+
+| Resolution | Action |
+|------------|--------|
+| `wait-and-retry` | Skip row, continue — transient timeout/network |
+| `clear-session` | Delete `.sessions/<platform>/<account>/` — stale login |
+| `restart-browser` | Close browser context — browser crash |
+| `rotate-account` | Add to `.sessions/skip-accounts.json` — rate limited |
+| `fatal-skip` | Permanently skip account — suspended/banned |
+| `human-review-login` | Write to `logs/human-alerts.json` — OTP/2FA/CAPTCHA |
+| `human-review-code` | Write to `logs/human-alerts.json` — selector broke |
+
+### 9.3 Auto-Trust Learning Loop
+
 ```
-1. Get: https://www.kenresearch.com/blog/ai-market-2024
-2. Call: search_google("ai market 2024 ken research")
-3. Get: Results showing rank position 25
-4. Decide: Rank 25 = P1 (posts daily)
-5. Report: {rank: 25, priority: "P1", indexed: true}
+Batch run N:
+  Row 1 → ERROR: "still on /login page"
+  → KB: unknown → diagnoseError() via Claude API
+  → resolution_type: 'clear-session' saved to KB
+  → applyFix(): session directory deleted
+  → Row 1 marked Failed (NOT retried)
+
+Row 2 → same platform, runs with cleared session
+  → SUCCESS → recordFixOutcome(entry.id, true) → worked_count = 1
+
+Next 2 batch runs: same pattern → worked_count = 3 → auto_trusted = true
+
+Future batches: same error → fix applied fully automatically, no Claude API call needed
 ```
 
-**Example - Content Agent Loop:**
+### 9.4 Monitor Cycle
+
+Internal `node-cron` inside the daemon runs every 3 minutes:
+- Reads `logs/runtime.log` from last byte offset (no re-processing)
+- Parses ERROR JSON lines
+- Looks up KB → applies fix or escalates
+- Unknown errors → calls `diagnoseError()` → saves to KB → writes `logs/human-alerts.json`
+- Returns summary: `{newErrors, autoFixed, humanAlerts, unknownErrors}`
+
+**Log rotation:** If `logs/runtime.log` exceeds 50MB → renamed to `runtime.log.bak` → fresh file started.
+
+### 9.5 Claude CLI Role
+
+Claude CLI `/loop 3m npm run dev -- monitor` runs alongside the daemon. It reads the monitor output and handles `human-review-code` alerts — reading source files, editing selectors, updating the KB. It does NOT retry failed rows.
+
+**Key rule:** Failed row N is never retried. The fix is verified when row N+1 runs on the same platform.
+
+---
+
+## 10. Scheduler
+
+All times are Asia/Kolkata (IST). Implemented with `node-cron` in `src/scheduler-new.ts`.
+
 ```
-1. Get: Blog URL + "AI is transforming markets"
-2. Call: fetch_content(url) → Get article text
-3. Decide: Tweet angle = "AI market growing 300%"
-4. Generate: "🤖 AI market expanding rapidly... [tweet]"
-5. Call: run_sanity_check(tweet)
-6. If bad: Regenerate, run sanity check again (max 3 tries)
-7. Report: {tweet, fbPost, liPost, blog}
+11:00  — X Batch 1
+11:30  — X Batch 2 · FB Batch 1 · LI Batch 1 · Google Sites Batch 1
+11:45  — HackMD Batch 1
+12:00  — X Batch 3 · Linkmate Batch 1
+12:15  — Guffiz Batch 1
+12:30  — X Batch 4 · Calisthenics Batch 1
+12:45  — Substack Batch
+13:00  — Dev.to Batch
+13:15  — LinkedIn Pulse Batch
+13:30  — X Batch 5 · FB Batch 2 · LI Batch 2 · Medium Batch
+14:30  — X Batch 6 · FB Batch 3 · Google Sites Batch 2
+14:45  — HackMD Batch 2
+15:00  — X Batch 7 · Linkmate Batch 2
+15:15  — Guffiz Batch 2
+15:30  — X Batch 8 · FB Batch 4 · LI Batch 3 · Calisthenics Batch 2
+16:30  — X Batch 9
+17:00  — X Batch 10 (if needed)
+
+*/3    — Monitor cycle (every 3 min, all day)
+00:00  — Reset daily batch counters
+22:00 Sat — Weekly SERP recheck
+10:00 Sun — Sunday Examination (move failed posts to end of sheet for retry)
 ```
 
 ---
 
-## 🔧 Technical Stack
+## 11. File Structure
 
 ```
-Frontend: Google Sheets (data input/output)
-├─ Single sheet with all data
-└─ Google Sheets API for reads/writes
+src/
+  agents/
+    seoAgentNew.ts          — SERP analysis, priority assignment
+    contentAgentNew.ts      — tweet/FB/LI/blog generation per platform
+    xAgentNew.ts            — X posting agent loop
+    guffizBatchAgentNew.ts  — Guffiz batch agent
+    hackmdBatchAgentNew.ts  — HackMD batch agent
+    instagramBatchAgentNew.ts
+    substackBatchAgentNew.ts
+    youtubeBatchAgentNew.ts
 
-Backend: Node.js + TypeScript
-├─ Browser Automation: Playwright
-├─ AI: Claude API (claude-3-5-sonnet-20241022 via OpenRouter)
-├─ Search API: SerpAPI (Google rank checking)
-├─ Task Scheduling: node-cron (30-min checks, Saturday 10 PM)
-└─ State Management: JSON files in .sessions/
+  browser/
+    twitter/login.ts        — Playwright stealth login
+    twitter/poster.ts       — Playwright tweet posting + char counter
+    facebook/login.ts
+    facebook/poster.ts
+    linkedin/login.ts
+    linkedin/poster.ts (via pulse)
+    medium/                 — Medium browser automation
+    hackmd/                 — HackMD browser automation
+    substack/               — Substack browser automation
+    guffiz/                 — Guffiz browser automation
+    linkmate/               — Linkmate browser automation
+    devto/                  — Dev.to browser automation
+    googlesite/             — Google Sites browser automation
+    linkedin-pulse/         — LinkedIn Pulse browser automation
+    calisthenics/           — Calisthenics browser automation
+    resilientBrowser.ts     — Shared aria/screenshot helpers
 
-Accounts Storage:
-├─ X/Twitter: 15 accounts with credentials
-├─ Facebook: 15 accounts with credentials
-└─ LinkedIn: 15 accounts with credentials
+  coordinator/
+    masterCoordinator.ts    — All batch runners + error wiring
 
-Logs & Monitoring:
-├─ Daily counters: How many posted today
-├─ Cooldown timers: When next batch can run
-├─ Batch state: Which row FB/LI are at
-└─ Error logs: What failed and why
+  config/
+    serpApiClient.ts        — Round-robin SERP provider rotation
+    openRouterClient.ts     — LLM client
+    accounts.ts             — Account config loader
+
+  sheets/
+    sheets.ts               — All Google Sheets read/write functions
+
+  tools/
+    browserTools.ts         — Browser tool wrappers
+    getPendingRows.ts
+    postToFacebook.ts
+    postToLinkedin.ts
+    postToX.ts
+    saveResult.ts
+
+  errorInterceptor.ts       — console.error patch → runtime.log + Error KB
+  autoFix.ts                — Resolution executor (clear-session, restart, etc.)
+  monitor.ts                — Log tail + KB lookup + human alert writer
+  scheduler-new.ts          — All cron jobs
+  index.ts                  — Entry point + CLI modes
+
+logs/
+  runtime.log               — All ERROR/WARN lines (JSON, streamed)
+  error-kb.json             — Error knowledge base
+  human-alerts.json         — Errors needing human/code fix
+  .monitor-state.json       — Byte offset for log tailing
+
+.sessions/
+  batch-counters.json       — Ever-incrementing batch numbers per platform
+  provider-rotation.json    — Current SERP provider index
+  skip-accounts.json        — Rate-limited or banned accounts
+  tweet-history.json        — Past tweets per URL (deduplication)
+  chrome-*/                 — Persistent browser profiles per account
 ```
 
 ---
 
-## 📈 Daily Posting Capacity
+## 12. CLI Modes
 
-**X/Twitter:**
-- 13 batches × 15 URLs = **195 posts/day**
-- Timing: 11:00 AM - 5:30 PM IST (sequential, ~2 min per batch)
-- Cooldown: 30 minutes between batches
-
-**Facebook:**
-- 5 batches × 15 accounts = **75 posts/day**
-- Timing: 11:30 AM - 5:45 PM IST
-- Cooldown: 1 hour between batches
-- Each account: Open → Post → Close (sequential, ~3-5 min per account)
-
-**LinkedIn:**
-- 3 batches × 15 accounts = **45 posts/day**
-- Timing: 11:30 AM - 5:15 PM IST
-- Cooldown: 2 hours between batches
-- Each account: Open → Post → Close (sequential, ~3-5 min per account)
-
-**Total: 315 posts/day maximum**
-
----
-
-## 🔄 Week 2+ Features (Smart Recycling)
-
-### **Feature 1: Continuous Row Picking**
-- FB/LI don't reset daily - they continue where they left off
-- Week 1: Posts rows 1-15
-- Week 2: Posts rows 16-30
-- Benefit: No duplicate posting, steady flow, re-posts old content if updated
-
-### **Feature 2: Weekly SERP Re-check**
-- Saturday 10 PM: Automatically checks ranking for all old URLs
-- If article still ranks well: Mark eligible for re-posting
-- If article dropped: Update priority
-
-### **Feature 3: Content Regeneration**
-- When priority changes: Generates NEW unique content
-- Old tweet → New tweet (different angle, different hashtags)
-- Prevents boring repeated content
-
-### **Feature 4: Re-posting Logic**
-- Old post URLs cleared after re-check
-- FB/LI continuous picking selects them again
-- Fresh content generated → Posted again
-
----
-
-## 🛡️ Error Handling & Recovery
-
-The system automatically:
-- **Detects Popups:** Takes screenshot, uses vision to identify popup type
-- **Removes Popups:** Clicks dismiss, closes dialogs, dismisses notifications
-- **Retries Failed Posts:** 3 attempts per batch, then logs and skips
-- **Fixes Broken Selectors:** Reads code, identifies selector issues, suggests fixes
-- **Handles Rate Limits:** Waits and retries if platform returns 429 errors
-- **Detects Account Issues:** Skips locked/suspended accounts, logs reason
-
----
-
-## 🔐 Security & Safety
-
-- **Credentials:** Stored separately in .accounts/ directory (not in code)
-- **Session Persistence:** Browser profiles cached so no re-login each time
-- **Rate Limiting:** Hard limits enforced (195/day X, 75/day FB, 45/day LI)
-- **Posting Window:** Only posts 11 AM - 6 PM IST (no spam hours)
-- **Content Validation:** Sanity checks before posting (max 3 regeneration attempts)
-- **Error Tracking:** All errors logged with timestamp, context, and recovery action
-
----
-
-## 📱 Future Expansion
-
-This system is designed for expansion to additional platforms:
-
-**Phase 2 - Micro Blog Platforms:**
-- HackMD - Technical documentation sharing
-- Hashnode - Developer blog network
-- Google Sites - Simple website publishing
-- Medium - General interest publication
-- Dev.to - Developer community platform
-
-**Phase 3 - PR Distribution:**
-- Press release distribution networks
-- Media outreach platforms
-- Journalist contact automation
-
-Each platform will:
-1. Have its own agent (similar to X/FB/LI agents)
-2. Generate platform-specific content format
-3. Follow its own posting rules & rate limits
-4. Report results back to sheet
-5. Integrate into same scheduler & coordinator
-
----
-
-## 📊 Success Metrics
-
-- ✅ Posting Consistency: 315+ posts/day during window
-- ✅ Content Quality: All posts pass sanity check
-- ✅ Error Rate: < 5% failures after retries
-- ✅ Coverage: All 15 accounts per platform get posted
-- ✅ Recycling: 100% of old URLs re-checked on schedule
-- ✅ Uptime: 99.9% availability during posting window
-
----
-
-## 🚀 Deployment & Operations
-
-**Running the System:**
 ```bash
-npm run dev                    # Start daemon (runs until 6 PM IST)
-npx tsx tests/test-seo-agent  # Test SEO analysis
-npx tsx tests/test-content-agent # Test content generation
-```
-
-**Monitoring:**
-- Check `.sessions/daily-counts.json` for today's posting count
-- Check `logs/errors.json` for failure details
-- Review Google Sheet for posted URLs and results
-
-**Maintenance:**
-- Weekly: Check error logs for patterns
-- Monthly: Test new content generation quality
-- As needed: Update selectors if X/FB/LinkedIn UI changes
-
----
-
-## 🎓 How to Use
-
-### **Setup:**
-1. Place Ken Research blog URL in Google Sheet
-2. System automatically analyzes it
-3. Generates content and schedules posting
-
-### **Monitoring:**
-1. Check sheet for "posted" status
-2. Review generated content quality
-3. Click post URLs to verify on actual platforms
-
-### **Optimization:**
-1. Add market_value hints for better priority
-2. Check error logs for patterns
-3. Adjust cooldowns if needed for coverage
-
----
-
-## 📝 Example Workflow
-
-**Real Example - March 26, 2026:**
-
-```
-11:00 AM - Coordinator starts X Batch 1
-├─ Gets 15 unposted URLs from sheet
-├─ For each URL:
-│  ├─ SEO Agent checks: "AI market" article → Rank 25 → P1
-│  ├─ Content Agent generates: tweet, FB post, LI post, blog draft
-│  └─ X Agent posts tweet → Captures tweet URL
-├─ Updates sheet with results
-└─ Cooldown 30 min
-
-11:30 AM - Facebook Batch 1 starts
-├─ Gets 15 rows without FB post URL
-├─ For Account 1:
-│  ├─ Opens browser
-│  ├─ Logs in to Facebook
-│  ├─ Posts content
-│  ├─ Closes browser
-│  └─ Updates sheet
-├─ Repeats for accounts 2-15 (sequential)
-└─ Takes ~60 minutes total
-
-12:45 PM - LinkedIn Batch 1 starts
-├─ Same process as FB (but LinkedIn)
-└─ Takes ~60 minutes
-
-[Continue batches every 30 min for X through 5:30 PM]
-[Continue FB/LI batches respecting 1hr/2hr cooldowns]
-
-6:00 PM - Posting window closes
-└─ System logs daily summary
-
-Saturday 10:00 PM - Weekly SERP Re-check
-├─ Finds URLs checked > 7 days ago
-├─ Re-analyzes each with SEO Agent
-├─ If priority changed: regenerates content
-├─ Clears old post URLs for re-posting
-└─ Next week: FB/LI will repost these URLs
+npm run dev                              # Start cron daemon
+npm run dev -- run-x-batch              # Run X batch once now
+npm run dev -- run-fb-batch             # Run FB batch once now
+npm run dev -- run-li-batch             # Run LI batch once now
+npm run dev -- run-medium-batch         # Run Medium batch once now
+npm run dev -- run-linkmate-batch       # Run Linkmate batch once now
+npm run dev -- run-devto-batch          # Run Dev.to batch once now
+npm run dev -- run-googlesite-batch     # Run Google Sites batch once now
+npm run dev -- run-linkedin-pulse-batch # Run LinkedIn Pulse batch once now
+npm run dev -- run-calisthenics-batch   # Run Calisthenics batch once now
+npm run dev -- run-substack-batch       # Run Substack batch once now
+npm run dev -- run-guffiz-batch         # Run Guffiz batch once now
+npm run dev -- run-hackmd-batch         # Run HackMD batch once now
+npm run dev -- monitor                  # Run one monitor cycle (JSON output)
+npm run dev -- status                   # Show sheet stats
+npm run dev -- reset-medium-posts       # Clear Medium posting data for retesting
+npm run dev -- save-x-session <nick>    # Login and save X browser session
+npm run dev -- save-medium-session <nick>
+npm run dev -- save-linkmate-session <nick>
+npm run dev -- save-googlesite-session <nick>
+npm run dev -- save-calisthenics-session <nick>
+npm run dev -- save-substack-session <nick>
+npm run dev -- save-guffiz-session <nick>
+npm run dev -- save-hackmd-session <nick>
 ```
 
 ---
 
-## 🎯 Key Advantages
+## 13. Environment Variables
 
-1. **Fully Autonomous** - No human intervention needed
-2. **Scalable** - Can add more accounts without code changes
-3. **Smart** - Uses AI to understand content value
-4. **Safe** - Respects rate limits and platform policies
-5. **Recyclable** - Old valuable content gets reposted automatically
-6. **Observable** - Full audit trail in Google Sheet
-7. **Recoverable** - Automatic error detection and fixes
-8. **Expandable** - Architecture ready for new platforms
+```
+ANTHROPIC_API_KEY       — Claude AI (content generation + error diagnosis)
+SERPAPI_KEY             — SerpAPI provider
+ZENSERP_API_KEY         — Zenserp provider
+SERPSTACK_API_KEY       — Serpstack provider
+GOOGLE_SERVICE_ACCOUNT_JSON — Google Sheets access
+```
 
 ---
 
-**Status:** ✅ Production Ready for X, Facebook, LinkedIn
-**Next Phase:** Expansion to micro blog platforms + PR distribution
-**Maintenance:** Minimal (system self-healing, automated error recovery)
+## 14. Account Storage
 
+Account credentials stored outside the repo in `.accounts/`:
+
+```
+.accounts/
+  accounts.json           — X accounts (handle, email, password, sessionDir)
+  facebook-accounts.json  — Facebook accounts
+  linkedin-accounts.json  — LinkedIn accounts
+```
+
+Browser sessions (persistent Chrome profiles) stored in `.sessions/`:
+```
+.sessions/
+  x/<handle>/              — X session per account
+  facebook/<nickname>/     — Facebook session
+  linkedin/<nickname>/     — LinkedIn session
+  medium/<nickname>/       — Medium session
+  hackmd/<nickname>/       — HackMD session
+  substack/<nickname>/     — Substack session
+  guffiz/<nickname>/       — Guffiz session
+  linkmate/<nickname>/     — Linkmate session
+  googlesite/<nickname>/   — Google Sites session
+  calisthenics/<nickname>/ — Calisthenics session
+```
+
+---
+
+## 15. Weekly Maintenance Events
+
+| Time | Event | Action |
+|------|--------|--------|
+| Saturday 22:00 IST | Weekly SERP Recheck | Re-checks ranking for all URLs > 7 days old. Updates priority. Clears old post URLs if priority changed so they can be reposted with fresh content. |
+| Sunday 10:00 IST | Sunday Examination | Moves all rows with Failed/Error status to the end of the sheet so the batch picks them up again next week. |
+| Daily 00:00 IST | Counter Reset | Resets `batch-counters.json` so next day's batches start at Batch 1. |
+
+---
+
+## 16. Constraints & Rules
+
+- **No parallel browser sessions** — all posting is sequential (one account at a time) to avoid detection
+- **Google Sites first** — must run before all other blog platforms in each wave to set SEO priority
+- **Failed row rule** — a failed row is never retried in the same batch. Fix is verified on the next row
+- **Tweet quality** — over-limit tweets are regenerated (not trimmed) to preserve content quality
+- **SERP rotation** — providers rotate equally regardless of success/failure; 403 = exhausted
+- **Tweet uniqueness** — past tweets per URL are tracked; each repost must use a different angle, CTA, and structure
+- **Session management** — Chrome profiles persist across runs; never re-login unless session is explicitly cleared
+- **Content model** — always `claude-opus-4-6` for content generation and error diagnosis
+- **Posting window** — no hard window enforced in code; cron schedule limits posting to 11:00–17:00 IST
+
+---
+
+## 17. Known Error Patterns (Pre-seeded KB)
+
+| Error Pattern | Classification | Resolution |
+|---------------|----------------|------------|
+| `Timeout Nms exceeded` | RETRYABLE | wait-and-retry |
+| `net::ERR_` / `ECONNRESET` | RETRYABLE | wait-and-retry |
+| `Target page/context closed` | RETRYABLE | restart-browser |
+| `still on /login page` | FIXABLE | clear-session |
+| `Unable to log in` | FIXABLE | clear-session |
+| `OTP` / `2FA` / `captcha` / `verify` | NEEDS_HUMAN | human-review-login |
+| `suspended` / `banned` | FATAL | fatal-skip |
+| `Send button not found` | FIXABLE | human-review-code |
+| `locator.click: Timeout` | FIXABLE | human-review-code |
+| `TWEET_OVER_LIMIT:N` | FIXABLE | regenerate (handled inline, not KB) |
+
+---
+
+## 18. Success Metrics
+
+| Metric | Target |
+|--------|--------|
+| Daily posts | ~674 across 12 platforms |
+| Error auto-resolution rate | >90% after KB warm-up |
+| Human interventions/day | <2 (code-level only) |
+| Tweet regeneration rate | <5% of X posts |
+| SERP provider uptime | 100% (3-provider rotation) |
+| Session re-login rate | <1% per day (persistent profiles) |

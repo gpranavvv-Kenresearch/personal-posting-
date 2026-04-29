@@ -4,6 +4,7 @@
  */
 
 import { executeBrowserTool } from '../tools/browserTools.js';
+import { getAccountByHandle } from '../config/accounts.js';
 
 export interface XAgentResult {
   success: boolean;
@@ -17,6 +18,28 @@ export interface XAgentResult {
 /**
  * Run X posting directly via Playwright (no AI loop)
  */
+export async function runXThreadAgent(params: {
+  tweets: string[];
+  accountHandle: string;
+}): Promise<XAgentResult> {
+  const loginResult = await executeBrowserTool('login_x', { accountHandle: params.accountHandle });
+  if (!loginResult.success) {
+    return { success: false, tweetText: params.tweets[0] ?? '', error: loginResult.error ?? 'Login failed' };
+  }
+
+  const account = getAccountByHandle(params.accountHandle);
+  const realHandle = account?.handle || params.accountHandle;
+
+  const postResult = await executeBrowserTool('post_thread', {
+    tweets: params.tweets,
+    handle: realHandle,
+  });
+
+  return postResult.success
+    ? { success: true, tweetText: params.tweets[0], tweetUrl: postResult.tweetUrl }
+    : { success: false, tweetText: params.tweets[0], error: postResult.error ?? 'Thread post failed' };
+}
+
 export async function runXAgent(params: {
   tweetText: string;
   accountHandle: string;
@@ -38,10 +61,13 @@ export async function runXAgent(params: {
     return { ...base, success: false, error: loginResult.error ?? 'Login failed' };
   }
 
-  // Step 2: Post tweet
+  // Step 2: Post tweet — use real X handle (not nickname) for URL scan
+  const account = getAccountByHandle(params.accountHandle);
+  const realHandle = account?.handle || params.accountHandle;
+
   const postResult = await executeBrowserTool('post_tweet', {
     tweetText: params.tweetText,
-    handle: params.accountHandle,
+    handle: realHandle,
   });
 
   if (!postResult.success) {

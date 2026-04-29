@@ -188,7 +188,16 @@ export async function loginToLinkedIn(options?: {
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
   });
 
+  await browserContext.grantPermissions(['clipboard-read', 'clipboard-write']);
+
   const page = await browserContext.newPage();
+
+  try {
+    const cdp = await browserContext.newCDPSession(page);
+    const { windowId } = await cdp.send('Browser.getWindowForTarget');
+    await cdp.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'minimized' } });
+    await cdp.detach().catch(() => {});
+  } catch { /* not critical */ }
 
   const loggedIn = await ensureLoggedIn(page, email, password);
   if (!loggedIn) {
