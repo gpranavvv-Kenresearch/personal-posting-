@@ -1,7 +1,8 @@
-import { chromium, BrowserContext, Page } from 'playwright';
+﻿import { chromium, BrowserContext, Page } from 'playwright';
 import path from 'path';
 import fs from 'fs';
 import 'dotenv/config';
+import { killChromeForProfile } from '../../utils/killChrome.js';
 
 const BLOGGER_ACCOUNTS_FILE = '.accounts/accounts-blogger.json';
 const SESSION_ROOT = path.resolve('.sessions/blogger');
@@ -68,19 +69,18 @@ export async function loginToBlogger(options?: {
   if (!fs.existsSync(sessionDir)) {
     fs.mkdirSync(sessionDir, { recursive: true });
   }
+  await killChromeForProfile(sessionDir);
 
   console.log(`   Using session folder: ${sessionDir}`);
   console.log('   Launching Blogger browser...');
 
   browserContext = await chromium.launchPersistentContext(sessionDir, {
-    headless: false,
+    headless: true,
     executablePath: chromePath,
     viewport: null,
     slowMo: 50,
     ignoreDefaultArgs: ['--enable-automation'],
     args: [
-      '--no-sandbox',
-      '--start-maximized',
       '--disable-blink-features=AutomationControlled',
       '--disable-renderer-backgrounding',
       '--disable-background-timer-throttling',
@@ -102,6 +102,15 @@ export async function loginToBlogger(options?: {
 
   const existingPages = browserContext.pages();
   let page: Page;
+  // Minimize the window via CDP (--start-minimized flag is unreliable with navigation)
+  const _minimizeWindow = async (p: Page) => {
+    try {
+      const cdp = await browserContext!.newCDPSession(p);
+      const { windowId } = await (cdp as any).send('Browser.getWindowForTarget');
+      await (cdp as any).send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'minimized' } });
+      await cdp.detach().catch(() => {});
+    } catch { /* ignore if CDP unavailable */ }
+  };
   if (existingPages.length > 0) {
     page = existingPages[0];
     for (const p of existingPages.slice(1)) await p.close().catch(() => {});
@@ -109,8 +118,13 @@ export async function loginToBlogger(options?: {
     page = await browserContext.newPage();
   }
 
+  await _minimizeWindow(page);
+
   console.log('   Navigating to Blogger...');
   await page.goto('https://www.blogger.com/', { waitUntil: 'domcontentloaded', timeout: 30000 });
+  await _minimizeWindow(page);
+  await sleep(800);
+  await _minimizeWindow(page);
 
   console.log('   Waiting 5 seconds for session check...');
   await sleep(5000);
@@ -162,3 +176,4 @@ export async function loginToBlogger(options?: {
   console.log(`   ✅ Login successful`);
   return page;
 }
+

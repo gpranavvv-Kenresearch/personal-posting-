@@ -1,142 +1,125 @@
 import { Page } from 'playwright';
 import { injectUTM, UTM_PARAMS } from '../../utils/utm.js';
 
-const SMALL_DELAY = 800;
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
-/**
- * Post to Substack (expects logged-in page)
- * Content Format: HTML (pasted directly — Substack's Prosemirror editor renders it)
- */
+function jsClick(page: Page, selector: string) {
+  return page.evaluate((sel) => {
+    const el = document.querySelector(sel);
+    if (el) (el as HTMLElement).click();
+  }, selector);
+}
+
 export async function postToSubstack(
   page: Page,
   title: string,
   htmlContent: string,
-  publicationUrl: string,
+  _publicationUrl?: string,
 ): Promise<{ success: true; postUrl: string; postedAt: Date }> {
-  // UTM safety net — ensure correct UTMs before posting
   htmlContent = injectUTM(htmlContent, UTM_PARAMS.Substack);
 
-  const newPostUrl = `https://${publicationUrl}/publish/post`;
-  console.log(`   Navigating to new post editor: ${newPostUrl}`);
-  await page.goto(newPostUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+  // Step 1: Navigate to Substack home
+  console.log('   Navigating to Substack home...');
+  await page.goto('https://substack.com/', { waitUntil: 'domcontentloaded', timeout: 30000 });
   await sleep(3000);
 
-  // Fill title
-  console.log('   Filling title...');
-  const titleSelectors = [
-    '[data-testid="post-title"]',
-    'h1[contenteditable]',
-    'div[contenteditable][data-placeholder*="Title"]',
-    'div[contenteditable][data-placeholder*="title"]',
-    '.post-title [contenteditable]',
-    'textarea[placeholder*="Title"]',
-    'input[placeholder*="Title"]',
-  ];
+  // Step 2: Click Create button
+  console.log('   Clicking Create button...');
+  await page.click('button[aria-label="Create"]', { timeout: 10000 });
+  await sleep(1500);
 
-  let titleFilled = false;
-  for (const sel of titleSelectors) {
-    try {
-      const el = page.locator(sel).first();
-      if (await el.isVisible({ timeout: 2000 }).catch(() => false)) {
-        await el.click();
-        await sleep(300);
-        await page.keyboard.press('Control+A');
-        await sleep(200);
-        await page.keyboard.type(title, { delay: 30 });
-        await sleep(SMALL_DELAY);
-        titleFilled = true;
-        console.log(`   Title filled via: ${sel}`);
-        break;
-      }
-    } catch {}
-  }
-
-  if (!titleFilled) {
-    throw new Error('Title field not found in Substack editor');
-  }
-
-  // Click body editor and paste HTML content
-  console.log('   Pasting HTML content...');
-  const bodySelectors = [
-    '.ProseMirror',
-    'div[contenteditable="true"]:not(h1):not([data-placeholder*="Title"])',
-    '[data-testid="post-body"] [contenteditable]',
-    '.editor-content [contenteditable]',
-  ];
-
-  let bodyFilled = false;
-  for (const sel of bodySelectors) {
-    try {
-      const el = page.locator(sel).first();
-      if (await el.isVisible({ timeout: 2000 }).catch(() => false)) {
-        await el.click();
-        await sleep(500);
-
-        // Insert HTML directly — no clipboard
-        await page.evaluate((html) => {
-          document.execCommand('insertHTML', false, html);
-        }, htmlContent);
-        await sleep(2000);
-
-        bodyFilled = true;
-        console.log(`   Body pasted via: ${sel}`);
-        break;
-      }
-    } catch {}
-  }
-
-  if (!bodyFilled) {
-    throw new Error('Body editor not found in Substack editor');
-  }
-
-  // Click Publish button
-  console.log('   Clicking Publish...');
-  const publishSelectors = [
-    'button:has-text("Publish")',
-    'button:has-text("Publish now")',
-    '[data-testid="publish-button"]',
-  ];
-
-  let published = false;
-  for (const sel of publishSelectors) {
-    try {
-      const btn = page.locator(sel).first();
-      if (await btn.isVisible({ timeout: 3000 }).catch(() => false)) {
-        await btn.click();
-        await sleep(2000);
-        published = true;
-        break;
-      }
-    } catch {}
-  }
-
-  if (!published) {
-    throw new Error('Publish button not found in Substack editor');
-  }
-
-  // Confirm in publish modal if present (second "Publish" / "Publish now" button)
+  // Step 3: Click Article from dropdown
+  console.log('   Clicking Article...');
   try {
-    const confirmBtn = page.locator('button:has-text("Publish now"), button:has-text("Publish post")').first();
-    if (await confirmBtn.isVisible({ timeout: 4000 }).catch(() => false)) {
-      await confirmBtn.click();
-      await sleep(3000);
-    }
-  } catch {}
-
-  // Wait for redirect to published post
-  try {
-    await page.waitForURL(`https://${publicationUrl}/p/**`, { timeout: 15000 });
+    // Try the menu item link first
+    await page.click('a[role="menuitem"][href*="/publish/post"]', { timeout: 5000 });
   } catch {
-    // URL may not redirect — continue and return current URL
+    // Fallback: click by text
+    await page.getByRole('menuitem').filter({ hasText: 'Article' }).click({ timeout: 5000 });
+  }
+  console.log('   ✅ Article clicked — waiting for editor...');
+  await sleep(4000);
+
+  // Step 4: Fill title
+  console.log('   Typing title...');
+  await page.click('textarea[data-testid="post-title"]', { timeout: 10000 });
+  await sleep(300);
+  await page.keyboard.press('Control+A');
+  await page.keyboard.press('Backspace');
+  await page.keyboard.type(String(title).trim(), { delay: 40 });
+  console.log('   ✅ Title typed');
+
+  // Step 5: Render HTML in temp page → copy to clipboard → paste into editor
+  console.log('   Rendering HTML in temp page and copying...');
+  try {
+    const tempPage = await page.context().newPage();
+    try {
+      await tempPage.setContent(htmlContent, { waitUntil: 'domcontentloaded', timeout: 20000 });
+      await tempPage.waitForTimeout(2000);
+      await tempPage.keyboard.press('Control+A');
+      await tempPage.waitForTimeout(300);
+      await tempPage.keyboard.press('Control+C');
+      await tempPage.waitForTimeout(500);
+      console.log('   ✅ HTML rendered and copied');
+    } finally {
+      await tempPage.close();
+    }
+  } catch (err: any) {
+    console.warn(`   ⚠️ Could not render/copy HTML: ${err.message}`);
   }
 
-  const publishedUrl = page.url();
-  console.log(`   ✅ Post published. URL: ${publishedUrl}`);
+  // Click editor body and paste
+  console.log('   Clicking editor and pasting...');
+  await page.click('div[contenteditable="true"][data-testid="editor"]', { timeout: 10000 });
+  await sleep(1000);
+  await page.keyboard.press('Control+V');
+  console.log('   ✅ Content pasted');
+  await sleep(2000);
+
+  // Step 6: Click Publish button
+  console.log('   Clicking Publish...');
+  await page.click('button[data-testid="publish-button"]', { timeout: 10000 });
+  console.log('   ✅ Publish clicked');
+  await sleep(3000);
+
+  // Step 7: Click "Send to everyone now"
+  console.log('   Clicking Send to everyone now...');
+  try {
+    await page.getByRole('button', { name: 'Send to everyone now' }).click({ timeout: 10000 });
+    console.log('   ✅ Sent to everyone');
+  } catch {
+    // Fallback text match
+    await page.locator('button:has-text("Send to everyone now")').click({ timeout: 5000 });
+  }
+  await sleep(5000);
+
+  // Step 8: Click the post attachment link which opens the published post in a new tab
+  console.log('   Clicking post attachment link to get published URL...');
+  let postUrl = page.url();
+  try {
+    const attachmentLink = page.locator('[data-testid="feed-attachment-link"].postAttachment-eYV3fM').first();
+    await attachmentLink.waitFor({ state: 'visible', timeout: 10000 });
+
+    const [newTab] = await Promise.all([
+      page.context().waitForEvent('page'),
+      attachmentLink.click(),
+    ]);
+
+    await newTab.waitForLoadState('domcontentloaded', { timeout: 15000 });
+    await sleep(2000);
+    postUrl = newTab.url();
+    console.log(`   ✅ Got URL from new tab: ${postUrl}`);
+    await newTab.close();
+  } catch (err: any) {
+    console.warn(`   ⚠️ Could not get URL from attachment link, using address bar: ${err.message}`);
+    postUrl = page.url();
+  }
+
+  console.log(`   ✅ Published. URL: ${postUrl}`);
 
   return {
     success: true,
-    postUrl: publishedUrl,
+    postUrl,
     postedAt: new Date(),
   };
 }

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * postToX.ts — CLI intervention tool for Claude
  *
  * Called by Claude CLI when the main npm run dev X poster fails.
@@ -53,13 +53,14 @@ async function main() {
 
   const browser = statePath
     ? await chromium.launch({
-        headless: false,
+        headless: true,
+        args: ['--start-minimized'],
         executablePath: fs.existsSync(process.env.CHROME_PATH || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe')
           ? process.env.CHROME_PATH || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe'
           : undefined,
         channel: fs.existsSync(process.env.CHROME_PATH || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe') ? undefined : 'chrome',
         slowMo: 50,
-        ignoreDefaultArgs: ['--enable-automation', '--no-sandbox'],
+        ignoreDefaultArgs: ['--enable-automation'],
       })
     : null;
   const ctx = statePath
@@ -68,10 +69,11 @@ async function main() {
         viewport: { width: 1280, height: 900 },
       })
     : await chromium.launchPersistentContext(path.resolve(account.sessionDir), {
-        headless: false,
+        headless: true,
         channel: 'chrome',
+        args: ['--start-minimized'],
         slowMo: 50,
-        ignoreDefaultArgs: ['--enable-automation', '--no-sandbox'],
+        ignoreDefaultArgs: ['--enable-automation'],
         viewport: { width: 1280, height: 900 },
       });
 
@@ -166,3 +168,4 @@ async function main() {
 }
 
 main();
+

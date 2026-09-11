@@ -21,7 +21,6 @@
 
 import fs from 'fs';
 import path from 'path';
-import Anthropic from '@anthropic-ai/sdk';
 import 'dotenv/config';
 
 import {
@@ -91,42 +90,7 @@ async function diagnoseError(
   errorMessage: string,
   context: { platform?: string; stage?: string }
 ): Promise<string> {
-  try {
-    const apiKey = process.env.ANTHROPIC_API_KEY;
-    if (!apiKey) return '⚠️ No ANTHROPIC_API_KEY — cannot diagnose';
-
-    const client = new Anthropic({ apiKey });
-    const prompt = `You are an expert error diagnosis system for a social media posting automation agent.
-Analyze this error and provide a BRIEF (1-2 sentences) fix suggestion.
-
-Error: ${errorMessage}
-Platform: ${context.platform ?? 'unknown'}
-Stage: ${context.stage ?? 'unknown'}
-
-Also suggest the resolution_type from this list:
-- wait-and-retry (transient timeout/network error)
-- clear-session (stale login session)
-- restart-browser (browser context crashed)
-- rotate-account (account rate-limited or soft-banned)
-- human-review-login (OTP, CAPTCHA, 2FA needed)
-- human-review-code (selector/code change needed)
-- fatal-skip (account permanently banned)
-
-Respond in this exact format:
-DIAGNOSIS: <your 1-2 sentence fix suggestion>
-RESOLUTION: <one of the resolution_type values above>`;
-
-    const response = await client.messages.create({
-      model: 'claude-opus-4-6',
-      max_tokens: 200,
-      messages: [{ role: 'user', content: prompt }],
-    });
-
-    const text = response.content.find(c => c.type === 'text');
-    return text && text.type === 'text' ? text.text.trim() : 'Unable to diagnose';
-  } catch (err: any) {
-    return `⚠️ Diagnosis failed: ${err.message}`;
-  }
+  return `DIAGNOSIS: Check error manually — platform: ${context.platform ?? 'unknown'}, stage: ${context.stage ?? 'unknown'}.\nRESOLUTION: human-review-code`;
 }
 
 function parseDiagnosisResponse(raw: string): { diagnosis: string; resolutionType: string | null } {

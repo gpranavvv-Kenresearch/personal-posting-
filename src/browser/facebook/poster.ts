@@ -1,11 +1,17 @@
 import { Page } from 'playwright';
-import { humanDelay } from '../stagehand.js';
+import { humanDelay, pasteTextPlain } from '../stagehand.js';
+import { preparePlainSocialPost } from '../../utils/socialText.js';
 import 'dotenv/config';
 
 export async function postToFacebook(
   page: Page,
   postText: string,
 ): Promise<{ success: true; postUrl: string; postText: string; postedAt: Date }> {
+  const cleanPostText = preparePlainSocialPost(postText);
+  if (cleanPostText !== postText.trim()) {
+    console.log('   Removed markdown bold markers before posting to Facebook');
+  }
+
   console.log('   Navigating to Facebook home...');
   await page.goto('https://www.facebook.com/', { waitUntil: 'domcontentloaded' });
   await humanDelay(2000, 3000);
@@ -42,8 +48,11 @@ export async function postToFacebook(
   await humanDelay(800, 1200);
 
   console.log('   Pasting post...');
-  await page.keyboard.insertText(postText);
+  await pasteTextPlain(page, cleanPostText);
   await humanDelay(1500, 2500);
+
+  await page.keyboard.press('Enter');
+  await humanDelay(800, 1200);
 
   // Click the Post button inside the dialog — try multiple selectors
   console.log('   Clicking Post...');
@@ -64,76 +73,67 @@ export async function postToFacebook(
   }
   if (!posted) throw new Error('Could not find Post/Share button in Facebook composer dialog.');
 
-  // Wait 8 seconds for post to publish
-  console.log('   Waiting 8s for post to publish...');
-  await humanDelay(8000, 8000);
+  // Wait 5-8s for the post to actually publish before touching Share/Copy link
+  console.log('   Waiting for post to publish...');
+  await humanDelay(5000, 8000);
 
   let postUrl = '';
 
-  // Strategy 1: find permalink from feed — timestamp <a> links to the post
-  console.log('   Extracting post URL from feed...');
-  try {
-    postUrl = await page.evaluate((): string => {
-      // Facebook post timestamps are <a> tags whose href is the post permalink
-      const links = Array.from(document.querySelectorAll('a[href]')) as HTMLAnchorElement[];
-      for (const a of links) {
-        const href = a.href || '';
-        if (
-          (href.includes('/posts/') || href.includes('story_fbid') || href.includes('/permalink/')) &&
-          href.includes('facebook.com')
-        ) {
-          return href.split('?')[0]; // strip query params
-        }
-      }
-      return '';
-    });
-    if (postUrl) console.log(`   ✅ Permalink found in DOM: ${postUrl}`);
-  } catch { /* fall through */ }
-
-  // Strategy 2: Share button → Copy link (clipboard)
-  if (!postUrl) {
-    const getShareUrl = async (): Promise<string> => {
-      const shareSelectors = [
-        'div[aria-label="Send this to friends or post it on your profile."][role="button"]',
-        'div[aria-label*="Share"][role="button"]',
-        'span[aria-label*="Share"]',
-      ];
-      for (const sel of shareSelectors) {
-        try {
-          await page.locator(sel).first().click({ timeout: 3000 });
-          break;
-        } catch { /* try next */ }
-      }
-      await humanDelay(1000, 1500);
-      await page.locator('span:has-text("Copy link")').first().click({ timeout: 5000 });
-      await humanDelay(800, 1000);
-      return await page.evaluate(() => navigator.clipboard.readText()).catch(() => '');
-    };
-
-    for (let attempt = 1; attempt <= 3; attempt++) {
+  // Only source of truth for the post URL: Share button → Copy link (clipboard).
+  // No DOM scraping anywhere else — the feed can contain other posts' permalinks
+  // and that scrape was picking up the wrong URL.
+  const getShareUrl = async (): Promise<string> => {
+    const shareSelectors = [
+      'div[aria-label="Send this to friends or post it on your profile."][role="button"]',
+      'div[aria-label*="Share"][role="button"]',
+      'span[aria-label*="Share"]',
+    ];
+    for (const sel of shareSelectors) {
       try {
-        console.log(`   Trying Share → Copy link (attempt ${attempt}/3)...`);
-        const copied = await getShareUrl();
-        if (copied && (copied.includes('/posts/') || copied.includes('story_fbid') || copied.includes('facebook.com'))) {
-          postUrl = copied;
-          console.log(`   ✅ URL from clipboard: ${postUrl}`);
-          break;
-        }
-        await humanDelay(2000, 3000);
-      } catch (err: any) {
-        console.log(`   ⚠️ Attempt ${attempt} failed: ${err.message?.slice(0, 80)}`);
-        await humanDelay(2000, 3000);
+        await page.locator(sel).first().click({ timeout: 3000 });
+        break;
+      } catch { /* try next */ }
+    }
+    await humanDelay(1000, 1500);
+    await page.locator('span:has-text("Copy link")').first().click({ timeout: 5000 });
+    await humanDelay(800, 1000);
+    return await page.evaluate(() => navigator.clipboard.readText()).catch(() => '');
+  };
+
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      console.log(`   Trying Share → Copy link (attempt ${attempt}/3)...`);
+      const copied = await getShareUrl();
+      if (copied && (copied.includes('/posts/') || copied.includes('story_fbid') || copied.includes('facebook.com'))) {
+        postUrl = copied;
+        console.log(`   ✅ URL from clipboard: ${postUrl}`);
+        break;
       }
+      await humanDelay(2000, 3000);
+    } catch (err: any) {
+      console.log(`   ⚠️ Attempt ${attempt} failed: ${err.message?.slice(0, 80)}`);
+      await humanDelay(2000, 3000);
     }
   }
 
   console.log(`   Post URL: ${postUrl || '(not captured)'}`);
 
-  // Post was published even if URL capture failed — return success with whatever URL we have
+  if (!postUrl) {
+    // No real permalink found by either strategy — verify the compose dialog
+    // actually closed before assuming the post went through. Previously this
+    // fell back to returning the bare homepage URL as "success", which wrote
+    // fake post data to the sheet even when nothing was actually published.
+    const dialogStillOpen = await page.locator(textAreaSelector).first().isVisible().catch(() => false);
+    if (dialogStillOpen) {
+      throw new Error('Facebook post dialog still open and no post URL found — publish likely did not go through.');
+    }
+    console.warn('   ⚠️  Dialog closed but no post URL captured — post likely succeeded, but URL is unverified.');
+  }
+
   return {
     success: true,
     postUrl: postUrl || 'https://www.facebook.com/',
-    postText,
+    postText: cleanPostText,
     postedAt: new Date(),
   };
 }

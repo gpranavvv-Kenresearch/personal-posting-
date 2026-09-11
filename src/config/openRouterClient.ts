@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { stripModelArtifacts } from '../utils/textChecks.js';
 
 const STATE_FILE = path.resolve('.sessions/openrouter-key-state.json');
 const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1';
@@ -45,24 +46,6 @@ export interface OpenRouterParams {
   messages: OpenRouterMessage[];
 }
 
-// ── Vision (multimodal) types ──────────────────────────────────────────────
-
-export type VisionContentBlock =
-  | { type: 'text'; text: string }
-  | { type: 'image_url'; image_url: { url: string } };
-
-export interface VisionMessage {
-  role: 'user' | 'assistant' | 'system';
-  content: string | VisionContentBlock[];
-}
-
-export interface VisionParams {
-  model: string;
-  max_tokens: number;
-  system?: string;
-  messages: VisionMessage[];
-}
-
 export interface OpenRouterResponse {
   content: Array<{ type: string; text: string }>;
 }
@@ -99,82 +82,12 @@ async function makeRequest(key: string, params: OpenRouterParams): Promise<OpenR
   }
 
   const json = await res.json() as { choices: Array<{ message: { content: string } }> };
-  const text = json.choices?.[0]?.message?.content ?? '';
+  const text = stripModelArtifacts(json.choices?.[0]?.message?.content ?? '');
 
   // Return in same shape as Anthropic SDK so callers need no changes
   return {
     content: [{ type: 'text', text }],
   };
-}
-
-async function makeVisionRequest(key: string, params: VisionParams): Promise<OpenRouterResponse> {
-  const messages: VisionMessage[] = params.system
-    ? [{ role: 'system', content: params.system }, ...params.messages]
-    : params.messages;
-
-  const res = await fetch(`${OPENROUTER_BASE_URL}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${key}`,
-      'Content-Type': 'application/json',
-      'HTTP-Referer': 'https://kenresearch.com',
-      'X-Title': 'Ken Research Posting Agent',
-    },
-    body: JSON.stringify({ model: params.model, max_tokens: params.max_tokens, messages }),
-  });
-
-  if (res.status === 402) {
-    const err = new Error('CREDITS_EXHAUSTED');
-    (err as NodeJS.ErrnoException).code = '402';
-    throw err;
-  }
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`OpenRouter API error ${res.status}: ${text}`);
-  }
-
-  const json = await res.json() as { choices: Array<{ message: { content: string } }> };
-  const text = json.choices?.[0]?.message?.content ?? '';
-  return { content: [{ type: 'text', text }] };
-}
-
-export async function callOpenRouterVision(params: VisionParams): Promise<OpenRouterResponse> {
-  const keys = loadKeys();
-  if (keys.length === 0) {
-    throw new Error('No OpenRouter API keys found. Set OPENROUTER_API_KEY_1 … _15 in .env');
-  }
-
-  const state = loadState();
-  let index = state.currentIndex % keys.length;
-  const startIndex = index;
-  let attempts = 0;
-
-  while (attempts < keys.length) {
-    try {
-      const result = await makeVisionRequest(keys[index], params);
-      if (index !== state.currentIndex) saveState(index);
-      return result;
-    } catch (err: unknown) {
-      const isCreditsError =
-        err instanceof Error &&
-        (err.message === 'CREDITS_EXHAUSTED' ||
-          err.message.includes('402') ||
-          err.message.toLowerCase().includes('credit') ||
-          err.message.toLowerCase().includes('insufficient'));
-
-      if (isCreditsError) {
-        console.warn(`   ⚠️  OpenRouter key ${index + 1} credits exhausted — rotating`);
-        index = (index + 1) % keys.length;
-        saveState(index);
-        attempts++;
-        if (index === startIndex) throw new Error('All OpenRouter keys exhausted');
-      } else {
-        throw err;
-      }
-    }
-  }
-
-  throw new Error('All OpenRouter keys exhausted');
 }
 
 export async function callOpenRouter(params: OpenRouterParams): Promise<OpenRouterResponse> {

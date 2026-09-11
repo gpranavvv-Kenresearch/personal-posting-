@@ -13,20 +13,13 @@ export async function postToLinkedinPulse(
   title: string,
   htmlContent: string,
   seoTitle?: string,
-  seoDescription?: string
+  seoDescription?: string,
+  shareCaption?: string
 ): Promise<{ success: true; postUrl: string; postedAt: Date }> {
   const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
   const randomDelay = async (min = 800, max = 2200) => {
     await sleep(Math.floor(Math.random() * (max - min + 1)) + min);
   };
-
-  // Minimize browser at start — stays minimized throughout
-  try {
-    const cdpMain = await page.context().newCDPSession(page);
-    const { windowId } = await cdpMain.send('Browser.getWindowForTarget');
-    await cdpMain.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'minimized' } });
-    await cdpMain.detach().catch(() => {});
-  } catch { /* ignore */ }
 
   // UTM safety net — ensure correct UTMs before posting
   htmlContent = injectUTM(htmlContent, UTM_PARAMS.LinkedIn);
@@ -60,7 +53,7 @@ export async function postToLinkedinPulse(
           await tempPage.setContent(htmlContent, { waitUntil: 'networkidle', timeout: 20000 }).catch(() =>
             tempPage.setContent(htmlContent, { waitUntil: 'domcontentloaded', timeout: 10000 })
           );
-          await tempPage.waitForTimeout(2000);
+          await tempPage.waitForTimeout(5000);
           await tempPage.keyboard.press('Control+A');
           await tempPage.waitForTimeout(300);
           await tempPage.keyboard.press('Control+C');
@@ -72,7 +65,8 @@ export async function postToLinkedinPulse(
         await bodyField.click({ delay: 200 }).catch(() => {});
         await randomDelay(400, 700);
         await page.keyboard.press('Control+V');
-        await randomDelay(1500, 2500);
+        console.log('   Waiting 10s for pasted content to settle before continuing...');
+        await sleep(10000);
       }
     } catch (err) {
       console.warn(`   ⚠️ Could not paste body: ${(err as any).message}`);
@@ -149,13 +143,14 @@ export async function postToLinkedinPulse(
     await page.waitForSelector('div[role="textbox"][data-placeholder*="Tell your network"]', { timeout: 15000 }).catch(() => {});
 
     const shareBox = page.locator('div[role="textbox"][data-placeholder*="Tell your network"]').first();
-    if (await shareBox.isVisible().catch(() => false) && seoDescription) {
+    const shareText = shareCaption || seoDescription;
+    if (await shareBox.isVisible().catch(() => false) && shareText) {
       await shareBox.click({ delay: 120 }).catch(() => {});
       await page.keyboard.press('Control+A').catch(() => {});
       await page.keyboard.press('Delete').catch(() => {});
       await randomDelay(200, 400);
 
-      await page.keyboard.insertText(seoDescription);
+      await page.keyboard.insertText(shareText);
       await randomDelay(800, 1200);
     }
 
@@ -174,77 +169,40 @@ export async function postToLinkedinPulse(
       }
     }
 
-    // Dismiss Post-Publish Modal
-    console.log('   Dismissing post-publish modal...');
-    try {
-      await page.waitForTimeout(5000);
-
-      const dismissSelectors = [
-        'button[data-test-modal-close-btn]',
-        'button.artdeco-modal__dismiss[aria-label="Dismiss"]',
-        'button.artdeco-modal__dismiss',
-        'button[aria-label="Dismiss"]',
-        'svg.artdeco-button__icon',
-      ];
-
-      let dismissed = false;
-      for (const selector of dismissSelectors) {
-        const dismissBtn = page.locator(selector).first();
-        if (await dismissBtn.isVisible({ timeout: 3000 }).catch(() => false)) {
-          await dismissBtn.click({ delay: 150, force: true }).catch(() => {});
-          await randomDelay(1000, 1500);
-          dismissed = true;
-          break;
-        }
-      }
-
-      if (!dismissed) {
-        await page.keyboard.press('Escape').catch(() => {});
-        await page.waitForTimeout(1000);
-      }
-    } catch (err) {
-      console.warn(`   ⚠️ Could not dismiss modal: ${(err as any).message}`);
-    }
-
-    // Click "View post" Button
-    console.log('   Waiting for View post button...');
-    await page.waitForTimeout(2000);
-
-    const viewPostBtn = page.locator('a:has-text("View post"), a.ember-view[href*="/feed/update/"]').first();
-    if (await viewPostBtn.isVisible({ timeout: 5000 }).catch(() => false)) {
-      await viewPostBtn.click({ delay: 200 }).catch(() => {});
-      await page.waitForLoadState('domcontentloaded');
-      await randomDelay(1200, 1800);
-    } else {
-      console.log('   ⚠️ View post button not found, trying alternatives...');
-      const altView = page.locator('a:has-text("View article"), a:has-text("Open article")').first();
-      if (await altView.isVisible({ timeout: 3000 }).catch(() => false)) {
-        await altView.click({ delay: 200 }).catch(() => {});
-        await page.waitForLoadState('domcontentloaded');
-        await randomDelay(1200, 1800);
-      }
-    }
-
-    // Extract Final URL
-    await page.waitForTimeout(3000);
+    // Click "Get the link to this article" to capture the /pulse/ URL
+    console.log('   Waiting for post-publish modal...');
+    await page.waitForTimeout(5000);
 
     let finalUrl = '';
     try {
-      finalUrl = await page.$eval('link[rel="canonical"]', el => el.getAttribute('href') ?? '').catch(() => '');
-    } catch (_) {
-      finalUrl = '';
-    }
+      const getLinkBtn = page.locator('button.post-publish-modal__get-link-button, button:has(span:has-text("Get the link to this article"))').first();
+      if (await getLinkBtn.isVisible({ timeout: 8000 }).catch(() => false)) {
+        await getLinkBtn.click({ delay: 150 }).catch(() => {});
+        console.log('   Clicked Get the link to this article');
+        await page.waitForTimeout(2000);
 
-    if (!finalUrl) {
-      try {
-        finalUrl = await page.$eval('meta[property="og:url"]', el => el.getAttribute('content') ?? '').catch(() => '');
-      } catch (_) {
-        finalUrl = '';
+        // Click the Copy button in the link modal — this is the only source of truth for the /pulse/ URL
+        const copyBtn = page.locator('button:has-text("Copy"), button[aria-label*="Copy"], button.share-box-send-link__copy-button').last();
+        if (await copyBtn.isVisible({ timeout: 5000 }).catch(() => false)) {
+          await copyBtn.click({ delay: 150 }).catch(() => {});
+          console.log('   Clicked Copy button in link modal');
+          await page.waitForTimeout(1000);
+        }
+
+        // Read URL from clipboard (populated by the Copy button above)
+        finalUrl = await page.evaluate(() => navigator.clipboard.readText()).catch(() => '');
+        console.log(`   Clipboard URL: ${finalUrl}`);
       }
+    } catch (err) {
+      console.warn(`   ⚠️ Could not get article link: ${(err as any).message}`);
     }
 
-    if (!finalUrl) {
-      finalUrl = page.url();
+    // Fallback — read from page meta (never use address bar)
+    if (!finalUrl || !finalUrl.includes('/pulse/')) {
+      finalUrl = await page.$eval('link[rel="canonical"]', el => el.getAttribute('href') ?? '').catch(() => '');
+    }
+    if (!finalUrl || !finalUrl.includes('/pulse/')) {
+      finalUrl = await page.$eval('meta[property="og:url"]', el => el.getAttribute('content') ?? '').catch(() => '');
     }
 
     console.log(`   ✅ Article published. URL: ${finalUrl}`);

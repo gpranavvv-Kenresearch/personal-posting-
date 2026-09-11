@@ -1,7 +1,8 @@
-import { chromium, BrowserContext, Page } from 'playwright';
+﻿import { chromium, BrowserContext, Page } from 'playwright';
 import path from 'path';
 import fs from 'fs';
 import 'dotenv/config';
+import { killChromeForProfile } from '../../utils/killChrome.js';
 
 const LINKEDIN_ACCOUNTS_FILE = '.accounts/linkedin-accounts.json';
 const SESSION_ROOT = path.resolve('li-sessions');
@@ -163,6 +164,7 @@ export async function loginToLinkedIn(options?: {
   const chromePath = fs.existsSync(CHROME_PATH) ? CHROME_PATH : chromium.executablePath();
   const sessionDir = account?.sessionDir ? path.resolve(account.sessionDir) : sessionDirFor(email);
   fs.mkdirSync(sessionDir, { recursive: true });
+  await killChromeForProfile(sessionDir);
 
   console.log(`   Using session folder: ${sessionDir}`);
   console.log('   Launching LinkedIn browser...');
@@ -174,8 +176,6 @@ export async function loginToLinkedIn(options?: {
     slowMo: 50,
     ignoreDefaultArgs: ['--enable-automation'],
     args: [
-      '--no-sandbox',
-      '--start-maximized',
       '--disable-blink-features=AutomationControlled',
       '--disable-renderer-backgrounding',
       '--disable-background-timer-throttling',
@@ -192,12 +192,11 @@ export async function loginToLinkedIn(options?: {
 
   const page = await browserContext.newPage();
 
-  try {
-    const cdp = await browserContext.newCDPSession(page);
-    const { windowId } = await cdp.send('Browser.getWindowForTarget');
-    await cdp.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'minimized' } });
-    await cdp.detach().catch(() => {});
-  } catch { /* not critical */ }
+  // NOTE: previously minimized the window here via CDP right after launch.
+  // Chrome deprioritizes rendering/JS for minimized windows, which for a
+  // heavy client-rendered SPA like LinkedIn can mean the composer button
+  // never actually finishes rendering — every click then fails to find its
+  // target. Left visible (though headless:false already means a real window).
 
   const loggedIn = await ensureLoggedIn(page, email, password);
   if (!loggedIn) {
@@ -207,3 +206,4 @@ export async function loginToLinkedIn(options?: {
 
   return page;
 }
+

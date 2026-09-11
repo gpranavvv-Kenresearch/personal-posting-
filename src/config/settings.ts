@@ -1,4 +1,4 @@
-import dotenv from 'dotenv';
+﻿import dotenv from 'dotenv';
 
 dotenv.config();
 
@@ -7,17 +7,14 @@ export const settings = {
     keys: Array.from({ length: 10 }, (_, i) => process.env[`OPENROUTER_API_KEY_${i + 1}`] || '').filter(Boolean),
     model: 'anthropic/claude-haiku-4-5',
   },
-  anthropic: {
-    apiKey: process.env.ANTHROPIC_API_KEY || '',
-    model: 'claude-sonnet-4-20250514',
-  },
   twitter: {
     username: process.env.X_USERNAME || '',
     password: process.env.X_PASSWORD || '',
     handle: process.env.X_HANDLE || '',
   },
   browser: {
-    headless: false,
+    headless: true,
+    args: ['--start-minimized'],
     viewport: { width: 1280, height: 800 },
     stealth: true,
   },
@@ -75,3 +72,4 @@ export function validateLinkedInConfig(): void {
   const missing = required.filter(key => !process.env[key]);
   if (missing.length > 0) throw new Error(`Missing env vars for LinkedIn: ${missing.join(', ')}`);
 }
+

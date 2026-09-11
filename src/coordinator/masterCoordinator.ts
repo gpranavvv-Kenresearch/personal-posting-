@@ -4,23 +4,78 @@
  * No cooldown logic — cron in scheduler-new.ts handles timing.
  * Each platform batch function is called directly by cron.
  *
- * X Batch  : SEO → generateTweet → post → save (seo data + xPostUrl + xBatch)
- * FB Batch : SEO (if not done) → generateFbPost → post → save (seo data + fbPostUrl + fbBatch)
- * LI Batch : SEO (if not done) → generateLiPost → post → save (seo data + liPostUrl + liBatch)
+ * X Batch  : pick today's Content from sheet → post → save (xPostUrl + xBatch)
+ * FB Batch : pick today's Content from sheet → post → save (fbPostUrl + fbBatch)
+ * LI Batch : pick today's Content from sheet → post → save (liPostUrl + liBatch)
  */
 
+/**
+ * Parse date-prefixed sheet content and return today's entry (stripped of date prefix).
+ *
+ * Formats supported:
+ *   "2026-05-05: post text..."
+ *   "2026-05-04: post1..." | "2026-05-05: post2..."
+ *
+ * Returns null if no entry matches today (row should be skipped).
+ * If content has no date prefix at all, returns the whole string as-is.
+ */
+function getTodayIST(): string {
+  // IST = UTC + 5:30 — use IST date so cron (Asia/Kolkata) and date-tags stay aligned
+  const now = new Date();
+  const istOffset = 5.5 * 60 * 60 * 1000;
+  const ist = new Date(now.getTime() + istOffset);
+  return ist.toISOString().split('T')[0];
+}
+
+function extractTodayPost(rawContent: string | undefined): string | null {
+  if (!rawContent?.trim()) return null;
+  const today = getTodayIST();
+
+  // Split on pipe separator — handles both ` | ` and `" | "` formats
+  const entries = rawContent.split(/["']?\s*\|\s*["']?/);
+
+  // Strip surrounding quotes/whitespace from each entry
+  const cleaned = entries.map(e => e.replace(/^["'\s]+|["'\s]+$/g, '').trim()).filter(Boolean);
+
+  // Find today's entry
+  const datePrefix = new RegExp(`^${today}:\\s*`);
+  const todayEntry = cleaned.find(e => datePrefix.test(e));
+
+  if (todayEntry) {
+    return todayEntry.replace(datePrefix, '').trim();
+  }
+
+  // No date prefix at all — use entire content as-is (backward compat)
+  if (!cleaned[0]?.match(/^\d{4}-\d{2}-\d{2}:/)) {
+    return cleaned[0] ?? null;
+  }
+
+  return null; // has date prefix but not today's
+}
+
+// For X/FB/LI: strip any date prefix (YYYY-MM-DD:) and return content as-is
+function extractSocialPost(rawContent: string | undefined): string | null {
+  if (!rawContent?.trim()) return null;
+  const content = rawContent.replace(/^["'\s]+|["'\s]+$/g, '').trim();
+  return content.replace(/^\d{4}-\d{2}-\d{2}:\s*/, '').trim() || null;
+}
+
+import { ensureTargetUrl, injectUTM, UTM_PARAMS } from '../utils/utm.js';
 import { recordError } from '../errorInterceptor.js';
 import { applyFix } from '../autoFix.js';
+import { postToHackMDApi } from '../browser/hackmd/apiPoster.js';
+import { getHackMDAccounts } from '../browser/hackmd/login.js';
 import { runSeoAnalysis } from '../agents/seoAgentNew.js';
-import { generateTweet, generateXThread, generateFbPost, generateLiPost, generateMediumPost, generateGoogleSitePost, generateDevtoPost, generateLinkedinPulsePost, generateCalisthenicsPost, generateSubstackPost, generateGuffizPost, generateHackmdPost, generateLinkmatePost } from '../agents/contentAgentNew.js';
+import { generateTweet, generateXThread, generateFbPost, generateTumblrPost, generateLiPost, generateMediumPost, generateGoogleSitePost, generateDevtoPost, generateLinkedinPulsePost, generateCalisthenicsPost, generateSubstackPost, generateHackmdPost, generateLinkmatePost, generateMastodonPost, generateTelegraphPost, generateBookmarkNote, MAX_POST_LENGTH, hasUnfilledPlaceholder } from '../agents/contentAgentNew.js';
+import { postToTelegraph } from '../browser/telegraph/poster.js';
 import { runXAgent, runXThreadAgent } from '../agents/xAgentNew.js';
-import { executeBrowserTool } from '../tools/browserTools.js';
+import { xAccountHasCapacity, incrementCount as incrementXCount } from '../config/accountTracker.js';
+import { executeBrowserTool, closeFbSession, closeLiSession } from '../tools/browserTools.js';
 import {
   getUnassignedRows,
   getUnassignedRowsAsSheetRows,
-  getRowsForContinuousXPosting,
-  getRowsForContinuousFbPosting,
-  getRowsForContinuousLiPosting,
+  getRowsNeedingSocialSlot,
+  saveSocialSlotResult,
   getRowsForContinuousMediumPosting,
   getRowsForContinuousLinkmatePosting,
   getRowsForContinuousDevtoPosting,
@@ -28,9 +83,23 @@ import {
   getRowsForContinuousLinkedinPulsePosting,
   getRowsForContinuousCalisthenicsPosting,
   getRowsForContinuousSubstackPosting,
-  getRowsForContinuousGuffizPosting,
+  getRowsForContinuousPatreonPosting,
+  getRowsForContinuousNotionPosting,
+  getRowsForContinuousNotePosting,
+  getRowsForContinuousNaverPosting,
+  getRowsForContinuousVelogPosting,
+  getRowsForContinuousCodaPosting,
+  getRowsForContinuousPdfhostPosting,
+  getRowsForContinuousFourSharedPosting,
+  getRowsForContinuousScribdPosting,
+  getRowsForContinuousMastodonPosting,
+  saveUnifiedMastodonResult,
+  saveUnifiedPatreonResult,
+  saveUnifiedNotionResult,
+  saveUnifiedNoteResult,
+  saveUnifiedNaverResult,
+  saveUnifiedCodaResult,
   getRowsForContinuousHackmdPosting,
-  savePostingResult,
   saveUnifiedSeoData,
   getUrlsDueForRecheck,
   saveWeeklySerpRecheck,
@@ -38,34 +107,74 @@ import {
   getRowsReadyForHackmd,
   saveUnifiedMediumResult,
   saveUnifiedLinkmateResult,
-  saveUnifiedGoogleSiteResult,
   saveUnifiedDevtoResult,
   saveLinkedinPulseResult,
   saveCalisthenicsResult,
   saveUnifiedSubstackResult,
-  saveUnifiedGuffizResult,
   saveUnifiedHackmdResult,
   saveUnifiedWordpressResult,
   saveUnifiedBloggerResult,
-  saveUnifiedPenzuResult,
-  saveUnifiedWriteupCafeResult,
-  getRowsReadyForWriteupCafe,
-  getRowsForContinuousWriteupCafePosting,
+  getRowsForContinuousWordpressPosting,
+  getRowsForContinuousBloggerPosting,
+  claimNextRowsForGroup,
+  unclaimGroupRow,
   examineSundayFailedPosts,
   getSheetRowByIndex,
   SheetRow,
+  getRowsForContinuousParagraphPosting,
+  saveUnifiedParagraphResult,
+  saveSlotResult,
+  savePdfPath,
 } from '../sheets/sheets.js';
+import { htmlToPdf, makeSlug } from '../utils/contentConverter.js';
+import { loginToPdfHost, closePdfHostBrowser } from '../browser/pdfhost/login.js';
+import { postToPdfHost } from '../browser/pdfhost/poster.js';
+import { loginToFourShared, closeFourSharedBrowser } from '../browser/fourshared/login.js';
+import { postToFourShared } from '../browser/fourshared/poster.js';
+import { loginToScribd, closeScribdBrowser } from '../browser/scribd/login.js';
+import { postToScribd } from '../browser/scribd/poster.js';
 import fs from 'fs';
-import Anthropic from '@anthropic-ai/sdk';
+import path from 'path';
 import 'dotenv/config';
 
 // ── Batch counter (persistent, ever-incrementing per platform) ───────────────
 
 const COUNTERS_FILE = '.sessions/batch-counters.json';
+const ROW_PROGRESS_FILE = path.resolve('.sessions/blog-row-progress.json');
+
+interface BlogRowProgress {
+  blogger: number;
+  wordpress: number;
+  [key: string]: number;
+}
+
+function getBlogRowProgress(): BlogRowProgress {
+  try {
+    if (fs.existsSync(ROW_PROGRESS_FILE)) {
+      const data = JSON.parse(fs.readFileSync(ROW_PROGRESS_FILE, 'utf8'));
+      console.log(`   📂 blog-row-progress: ${JSON.stringify(data)}`);
+      return data;
+    }
+  } catch (e: any) {
+    console.warn(`   ⚠️ Could not read blog-row-progress.json: ${e.message}`);
+  }
+  return { blogger: 0, wordpress: 0 };
+}
+
+function saveBlogRowProgress(p: BlogRowProgress): void {
+  try {
+    fs.mkdirSync(path.dirname(ROW_PROGRESS_FILE), { recursive: true });
+    fs.writeFileSync(ROW_PROGRESS_FILE, JSON.stringify(p, null, 2));
+    console.log(`   💾 blog-row-progress saved: ${JSON.stringify(p)}`);
+  } catch (e: any) {
+    console.error(`   ❌ FAILED to save blog-row-progress.json: ${e.message}`);
+  }
+}
 
 interface BatchCounters {
   x: number;
   fb: number;
+  tumblr: number;
   li: number;
   medium: number;
   linkmate: number;
@@ -74,31 +183,165 @@ interface BatchCounters {
   linkedinpulse: number;
   calisthenics: number;
   substack: number;
-  guffiz: number;
   hackmd: number;
-  writeupcafe: number;
+  patreon: number;
+  notion: number;
+  note: number;
+  naver: number;
+  velog: number;
+  coda: number;
+  wordpress: number;
+  blogger: number;
+  ameba: number;
+  paragraph: number;
+  pearltrees: number;
+  pdfhost: number;
+  instapaper: number;
+  raindrop: number;
+  scribd: number;
+  fourshared: number;
+  telegraph: number;
   // legacy field kept for backwards compat
   date?: string;
 }
 
-const ZERO_COUNTERS: BatchCounters = { x: 0, fb: 0, li: 0, medium: 0, linkmate: 0, googlesite: 0, devto: 0, linkedinpulse: 0, calisthenics: 0, substack: 0, guffiz: 0, hackmd: 0, writeupcafe: 0 };
+const ZERO_COUNTERS: BatchCounters = {
+  x: 0, fb: 0, tumblr: 0, li: 0, medium: 0, linkmate: 0, googlesite: 0, devto: 0, linkedinpulse: 0,
+  calisthenics: 0, substack: 0, hackmd: 0, patreon: 0, notion: 0, note: 0,
+  naver: 0, velog: 0, coda: 0,
+  wordpress: 0, blogger: 0, ameba: 0, paragraph: 0,
+  pearltrees: 0, pdfhost: 0, instapaper: 0, raindrop: 0,
+  scribd: 0, fourshared: 0, telegraph: 0,
+};
+
+// Display order + labels for the daily posting summary (mirrors the reporting sheet layout).
+const PLATFORM_LABELS: [keyof Omit<BatchCounters, 'date'>, string][] = [
+  ['x', 'X'],
+  ['fb', 'Facebook'],
+  ['tumblr', 'Tumblr'],
+  ['li', 'LinkedIn'],
+  ['hackmd', 'HackMD'],
+  ['googlesite', 'Google Sites'],
+  ['devto', 'Dev.to'],
+  ['linkmate', 'Linkmate'],
+  ['calisthenics', 'Calisthenics'],
+  ['wordpress', 'WordPress'],
+  ['blogger', 'Blogger'],
+  ['linkedinpulse', 'LinkedIn Pulse'],
+  ['medium', 'Medium'],
+  ['notion', 'Notion'],
+  ['paragraph', 'Paragraph'],
+  ['ameba', 'Ameblo'],
+  ['substack', 'Substack'],
+  ['patreon', 'Patreon'],
+  ['note', 'Note'],
+  ['naver', 'Naver'],
+  ['velog', 'Velog'],
+  ['coda', 'Coda'],
+  ['pearltrees', 'Pearltrees'],
+  ['pdfhost', 'PdfHost'],
+  ['instapaper', 'Instapaper'],
+  ['raindrop', 'Raindrop'],
+  ['scribd', 'Scribd'],
+  ['fourshared', '4shared'],
+  ['telegraph', 'Telegraph'],
+];
 
 function getCounters(): BatchCounters {
-  if (!fs.existsSync(COUNTERS_FILE)) return { ...ZERO_COUNTERS };
+  const today = getTodayIST();
+  if (!fs.existsSync(COUNTERS_FILE)) return { ...ZERO_COUNTERS, date: today };
   try {
     const saved = JSON.parse(fs.readFileSync(COUNTERS_FILE, 'utf8'));
+    // Self-heal: if the persisted date isn't today (missed midnight cron —
+    // e.g. daemon restart/crash/downtime spanning 00:00 IST), reset instead
+    // of silently accumulating across days.
+    if (saved.date !== today) {
+      console.log(`   ℹ️  Batch counters stale (saved date: ${saved.date ?? 'unknown'}, today: ${today}) — resetting`);
+      const fresh = { ...ZERO_COUNTERS, date: today };
+      saveCounters(fresh);
+      return fresh;
+    }
     // Merge with zeros so any missing platform key starts at 0
-    return { ...ZERO_COUNTERS, ...saved };
+    return { ...ZERO_COUNTERS, ...saved, date: today };
   } catch {
-    return { ...ZERO_COUNTERS };
+    return { ...ZERO_COUNTERS, date: today };
   }
 }
 
 function saveCounters(c: BatchCounters): void {
   fs.mkdirSync('.sessions', { recursive: true });
-  // Strip legacy date field
-  const { date: _date, ...rest } = c as any;
-  fs.writeFileSync(COUNTERS_FILE, JSON.stringify(rest, null, 2));
+  const withDate = { ...c, date: getTodayIST() };
+  fs.writeFileSync(COUNTERS_FILE, JSON.stringify(withDate, null, 2));
+}
+
+/** Increment the daily successful-post count for a platform. Call once per confirmed post URL. */
+function recordPost(platform: keyof Omit<BatchCounters, 'date'>): void {
+  const c = getCounters();
+  c[platform] = (c[platform] ?? 0) + 1;
+  saveCounters(c);
+}
+
+/** Build the "Daily Post Count" table — same shape as the manual screenshot report. */
+function buildDailySummary(): { platform: string; posts: number }[] {
+  const c = getCounters();
+  return PLATFORM_LABELS
+    .map(([key, label]) => ({ platform: label, posts: c[key] ?? 0 }))
+    .filter(r => r.posts > 0);
+}
+
+/** Build the plain-text version of the summary — this exact text is what gets written to the sheet. */
+function buildDailySummaryText(dateIST: string, rows: { platform: string; posts: number }[], total: number): string {
+  const lines = [`Daily Post Count: ${dateIST}`, ''];
+  for (const r of rows) lines.push(`${r.platform}: ${r.posts}`);
+  lines.push('', `TOTAL: ${total}`);
+  return lines.join('\n');
+}
+
+/** Print + persist the end-of-day posting summary, and write the full breakdown log to Algo Reports!F. */
+export async function runDailyPostingSummary(): Promise<void> {
+  const rows = buildDailySummary();
+  const total = rows.reduce((sum, r) => sum + r.posts, 0);
+  const dateIST = getTodayIST();
+
+  console.log(`\n┌─ Daily Post Count: ${dateIST} ──────────────`);
+  console.log('│ Platform          │ Posts');
+  console.log('├────────────────────┼───────');
+  for (const r of rows) {
+    console.log(`│ ${r.platform.padEnd(18)} │ ${r.posts}`);
+  }
+  console.log('├────────────────────┼───────');
+  console.log(`│ ${'TOTAL'.padEnd(18)} │ ${total}`);
+  console.log('└────────────────────┴───────\n');
+
+  const summaryText = buildDailySummaryText(dateIST, rows, total);
+
+  try {
+    const { saveDailyPostingCount } = await import('../sheets/sheets.js');
+    await saveDailyPostingCount(dateIST, summaryText);
+  } catch (err: any) {
+    console.error(`   ❌ Failed to write daily posting count to Algo Reports: ${err.message}`);
+  }
+}
+
+// ── Hard timeout wrapper ──────────────────────────────────────────────────────
+// Prevents a hung Playwright call from freezing the entire Node process.
+// NOTE: this does NOT cancel `promise` — it keeps running in the background.
+// browserTools.ts now keys FB/LI sessions per-account (fbPages/liPages maps) so an
+// abandoned call finishing late can no longer clobber a different account's live
+// browser. Still pass `onTimeout` to force-close the hung account's own browser
+// immediately, so the abandoned call dies fast instead of limping along for the
+// rest of the timeout window.
+// Usage: await withTimeout(loginToX(...), 60 * 1000, 'X login', () => closeXBrowser())
+function withTimeout<T>(promise: Promise<T>, ms: number, label = 'operation', onTimeout?: () => void): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) =>
+      setTimeout(() => {
+        try { onTimeout?.(); } catch { /* best effort */ }
+        reject(new Error(`${label} timed out after ${ms / 1000}s`));
+      }, ms)
+    ),
+  ]);
 }
 
 export function resetBatchCounters(): void {
@@ -150,42 +393,11 @@ export async function resetMediumPosts(): Promise<void> {
   console.log(`✅ Reset ${rows.length} Medium rows`);
 }
 
-// ── AI Error Diagnosis (Claude Brain) ──────────────────────────────────────────
-
 async function diagnoseError(
-  errorMessage: string,
-  context: {
-    rowTitle?: string;
-    rowIndex?: number;
-    platform?: string;
-    stage?: string;
-  }
+  _errorMessage: string,
+  _context: { rowTitle?: string; rowIndex?: number; platform?: string; stage?: string }
 ): Promise<string> {
-  try {
-    const apiKey = process.env.ANTHROPIC_API_KEY;
-    if (!apiKey) {
-      return '⚠️ No API key found for error diagnosis';
-    }
-
-    const client = new Anthropic({ apiKey });
-    const prompt = `You are an expert error diagnosis system. Analyze this error and provide a BRIEF (1-2 sentences) fix suggestion.
-
-Error: ${errorMessage}
-Context: Row "${context.rowTitle}" (${context.rowIndex}) during ${context.platform || 'unknown'} ${context.stage || 'processing'}
-
-Respond with ONLY the fix suggestion, nothing else. Example: "This is a timeout. Try increasing the delay between requests to 2 seconds."`;
-
-    const response = await client.messages.create({
-      model: 'claude-opus-4-6',
-      max_tokens: 150,
-      messages: [{ role: 'user', content: prompt }],
-    });
-
-    const textContent = response.content.find(c => c.type === 'text');
-    return textContent && textContent.type === 'text' ? textContent.text.trim() : 'Unable to diagnose';
-  } catch (err: any) {
-    return `⚠️ Diagnosis failed: ${err.message}`;
-  }
+  return '';
 }
 
 // ── X Batch ────────────────────────────────────────────────────────────────────
@@ -195,8 +407,7 @@ Respond with ONLY the fix suggestion, nothing else. Example: "This is a timeout.
  * SERP check disabled — re-enable by uncommenting runSeoAnalysis calls
  */
 export async function runXBatch(batchNum: number = 1): Promise<void> {
-  // Sequential pick: next 15 rows where X Post URL is empty
-  const batchUrls = await getRowsForContinuousXPosting(15);
+  const batchUrls = await getRowsNeedingSocialSlot(1, 15);
 
   if (batchUrls.length === 0) {
     console.log('[X BATCH] No rows available');
@@ -223,71 +434,42 @@ export async function runXBatch(batchNum: number = 1): Promise<void> {
     try {
       console.log(`  Processing: ${row.title.slice(0, 60)}`);
 
-      // SERP disabled — uncomment to re-enable:
-      // const seoData = await runSeoAnalysis(row.targetUrl, row.title);
-      // await saveUnifiedSeoData(row, seoData);
-      const seoData = { seoRanking: 1, priority: 'P1', rankPosition: -1, rankPage: 0 };
-
-      // 7-8 random rows per batch get thread treatment
-      const isThread = threadIndices.has(rowIdx);
-      let tweet = '';
-      let xResult;
-
-      if (isThread) {
-        console.log(`    🧵 Thread mode (X Thread flag set)`);
-        const tweets = await generateXThread({
-          url: row.targetUrl,
-          title: row.title,
-          marketValue: row.marketValue,
-        });
-        tweet = tweets[0];
-        xResult = await runXThreadAgent({ tweets, accountHandle: row.name });
-      } else {
-        // Generate tweet + post (retry with fresh generation if over limit)
-        const MAX_REGEN = 3;
-        tweet = await generateTweet({
-          url: row.targetUrl,
-          title: row.title,
-          seoRanking: seoData.seoRanking,
-          priority: seoData.priority,
-          marketValue: row.marketValue,
-        });
-
-        xResult = await runXAgent({ tweetText: tweet, accountHandle: row.name });
-
-        for (let regen = 1; regen < MAX_REGEN && !xResult.success && xResult.error?.startsWith('TWEET_OVER_LIMIT:'); regen++) {
-          const excess = parseInt(xResult.error.split(':')[1] ?? '0', 10);
-          console.log(`    🔄 Regenerating tweet (attempt ${regen + 1}/${MAX_REGEN}) — was ${excess} chars over limit`);
-          tweet = await generateTweet({
-            url: row.targetUrl,
-            title: row.title,
-            seoRanking: seoData.seoRanking,
-            priority: seoData.priority,
-            marketValue: row.marketValue,
-            overLimitBy: excess,
-          });
-          xResult = await runXAgent({ tweetText: tweet, accountHandle: row.name });
-        }
+      if (!xAccountHasCapacity(row.name)) {
+        console.log(`    ⏭ Skipping — @${row.name} already hit daily X post limit`);
+        continue;
       }
+
+      // Use sheet content if available, otherwise generate
+      let tweet = row.xPost?.trim() || '';
+      if (!tweet) {
+        console.log(`    ℹ️  No sheet content — generating tweet for: ${row.title.slice(0, 50)}`);
+        try {
+          tweet = await generateTweet({ url: row.targetUrl, title: row.title, seoRanking: 999, priority: row.priority ?? 'P3', marketValue: row.marketValue });
+        } catch (genErr: any) {
+          console.log(`    ⏭ Skipping — generation failed: ${genErr.message}`);
+          continue;
+        }
+        if (!tweet?.trim()) { console.log(`    ⏭ Skipping — generated content empty`); continue; }
+      }
+      const xResult = await runXAgent({ tweetText: tweet, accountHandle: row.name });
 
       // 3. Save result
       if (xResult.success) {
-        await savePostingResult(row, {
-          xPost: tweet,
-          xPostUrl: xResult.tweetUrl || '',
-          xStatus: 'Posted',
-          xError: '',
-          xBatch: batchLabel,
+        incrementXCount('x', row.name);
+        await saveSocialSlotResult(row.rowIndex, 1, 'X', {
+          url: xResult.tweetUrl || '',
+          status: 'Posted',
+          batch: batchLabel,
         });
         posted++;
+        recordPost('x');
         console.log(`    ✅ Posted → ${xResult.tweetUrl}`);
       } else {
-        await savePostingResult(row, {
-          xPost: tweet,
-          xPostUrl: '',
-          xStatus: 'Failed',
-          xError: xResult.error || 'Unknown error',
-          xBatch: batchLabel,
+        await saveSocialSlotResult(row.rowIndex, 1, 'X', {
+          url: '',
+          status: 'Failed',
+          error: xResult.error || 'Unknown error',
+          batch: batchLabel,
         });
         console.log(`    ❌ Failed: ${xResult.error}`);
       }
@@ -296,12 +478,11 @@ export async function runXBatch(batchNum: number = 1): Promise<void> {
       await applyFix(kbEntry, { platform: 'x', accountName: row.name, rowIndex: row.rowIndex });
       console.error(`  ❌ Row ${row.rowIndex} [${kbEntry.classification}]: ${err.message}`);
       try {
-        await savePostingResult(row, {
-          xPost: '',
-          xPostUrl: '',
-          xStatus: 'Error',
-          xError: err.message,
-          xBatch: batchLabel,
+        await saveSocialSlotResult(row.rowIndex, 1, 'X', {
+          url: '',
+          status: 'Error',
+          error: err.message,
+          batch: batchLabel,
         });
       } catch (saveErr: any) {
         console.error(`  ⚠️ Row ${row.rowIndex} ALSO FAILED TO SAVE ERROR: ${saveErr.message}`);
@@ -318,7 +499,7 @@ export async function runXBatch(batchNum: number = 1): Promise<void> {
  * Run FB batch: pick rows → SEO check → generate FB post → post → save all
  */
 export async function runFbBatch(batchNum: number = 1): Promise<void> {
-  const rows = await getRowsForContinuousFbPosting(15);
+  const rows = await getRowsNeedingSocialSlot(2, 15);
 
   if (rows.length === 0) {
     console.log('[FB BATCH] No rows available');
@@ -337,21 +518,34 @@ export async function runFbBatch(batchNum: number = 1): Promise<void> {
     try {
       console.log(`\n  Processing: ${row.title.slice(0, 60)}`);
 
-      // 1. Read SEO data from sheet (X batch writes SEO columns → no re-analysis here)
-      const seoData = {
-        seoRanking: parseInt(row.seoPage || '99') || 99,
-        priority: row.priority || 'P1',
-      };
-      console.log(`    SEO (from sheet): Page ${row.seoPage || 'N/A'} | Priority: ${seoData.priority}`);
-
-      // 2. Generate FB post
-      console.log(`    Generating FB content...`);
-      const fbPost = await generateFbPost({
-        url: row.targetUrl,
-        title: row.title,
-        seoRanking: seoData.seoRanking,
-        priority: seoData.priority,
-      });
+      // Use sheet content if available, otherwise generate — but never
+      // regenerate when FB Status already says "Generated" (content was
+      // prepared ahead of time by the standalone generate script).
+      let fbPost = row.fbPost?.trim() || '';
+      const fbAlreadyGenerated = (row.fbStatus || '').trim().toLowerCase() === 'generated';
+      if (!fbPost) {
+        if (fbAlreadyGenerated) {
+          console.log(`    ⏭ Skipping — FB Status is "Generated" but FB Post is empty (row ${row.rowIndex})`);
+          continue;
+        }
+        console.log(`    ℹ️  No sheet content — generating FB post for: ${row.title.slice(0, 50)}`);
+        try {
+          fbPost = await generateFbPost({ url: row.targetUrl, title: row.title, seoRanking: 999, priority: row.priority ?? 'P3' });
+        } catch (genErr: any) {
+          console.log(`    ⏭ Skipping — generation failed: ${genErr.message}`);
+          continue;
+        }
+        if (!fbPost?.trim()) { console.log(`    ⏭ Skipping — generated content empty`); continue; }
+      } else if (fbPost.length > MAX_POST_LENGTH || hasUnfilledPlaceholder(fbPost)) {
+        console.log(`    ⚠️  Sanity: sheet FB post ${hasUnfilledPlaceholder(fbPost) ? 'has an unfilled placeholder' : `is ${fbPost.length} chars (over ${MAX_POST_LENGTH})`} — regenerating`);
+        try {
+          fbPost = await generateFbPost({ url: row.targetUrl, title: row.title, seoRanking: 999, priority: row.priority ?? 'P3' });
+        } catch (genErr: any) {
+          console.log(`    ⏭ Skipping — regeneration failed: ${genErr.message}`);
+          continue;
+        }
+        if (!fbPost?.trim()) { console.log(`    ⏭ Skipping — regenerated content empty`); continue; }
+      }
       row.fbPost = fbPost;
 
       // 3. Post to FB
@@ -359,12 +553,15 @@ export async function runFbBatch(batchNum: number = 1): Promise<void> {
       const postResult = await postToFbAccount(row.name, fbPost);
 
       if (postResult.success) {
+        fbPost = postResult.postText || fbPost;
+        row.fbPost = fbPost;
         await saveFbBatchResult(row, {
           fbPost,
           fbPostUrl: postResult.postUrl || '',
           fbStatus: 'Posted',
           fbBatch: batchLabel,
         });
+        recordPost('fb');
         console.log(`    ✅ Posted → ${postResult.postUrl}`);
         posted++;
       } else {
@@ -406,15 +603,58 @@ export async function runFbBatch(batchNum: number = 1): Promise<void> {
 async function postToFbAccount(accountName: string, postText: string): Promise<{
   success: boolean;
   postUrl?: string;
+  postText?: string;
   error?: string;
 }> {
   try {
-    const loginResult = await executeBrowserTool('login_facebook', { nickname: accountName });
+    const loginResult = await withTimeout(
+      executeBrowserTool('login_facebook', { nickname: accountName }),
+      2 * 60 * 1000, `FB login:${accountName}`,
+      () => closeFbSession(accountName)
+    );
     if (!loginResult.success) {
       return { success: false, error: loginResult.error || 'Facebook login failed' };
     }
 
-    const postResult = await executeBrowserTool('post_facebook', { postText });
+    const postResult = await withTimeout(
+      executeBrowserTool('post_facebook', { nickname: accountName, postText }),
+      2 * 60 * 1000, `FB post:${accountName}`,
+      () => closeFbSession(accountName)
+    );
+    return {
+      success: postResult.success ?? false,
+      postUrl: postResult.postUrl,
+      postText: postResult.postText,
+      error: postResult.error,
+    };
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+}
+
+// ── Tumblr Batch ─────────────────────────────────────────────────────────────
+
+// Helper: Post to single Tumblr account
+function removeTumblrHashtags(text: string): string {
+  return text
+    .replace(/#[\p{L}\p{N}_]+/gu, '')
+    .replace(/\s+([,.;!?])/g, '$1')
+    .replace(/:\s*$/, '.')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
+
+async function postToTumblrAccount(accountName: string, postText: string, targetUrl: string): Promise<{
+  success: boolean;
+  postUrl?: string;
+  error?: string;
+}> {
+  try {
+    const loginResult = await executeBrowserTool('login_tumblr', { nickname: accountName });
+    if (!loginResult.success) {
+      return { success: false, error: loginResult.error || 'Tumblr login failed' };
+    }
+    const postResult = await executeBrowserTool('post_tumblr', { postText, targetUrl });
     return {
       success: postResult.success ?? false,
       postUrl: postResult.postUrl,
@@ -425,13 +665,506 @@ async function postToFbAccount(accountName: string, postText: string): Promise<{
   }
 }
 
+export async function runTumblrBatch(batchNum: number = 1): Promise<void> {
+  const rows = await getRowsNeedingSocialSlot(2, 15);
+
+  if (rows.length === 0) {
+    console.log('[TUMBLR BATCH] No rows available');
+    return;
+  }
+
+  const batchLabel = `Batch ${batchNum}`;
+
+  console.log(`\n[TUMBLR BATCH] Starting ${batchLabel}...`);
+  console.log(`  Found ${rows.length} rows ready for Tumblr posting`);
+
+  let posted = 0;
+  let failed = 0;
+
+  for (const row of rows) {
+    try {
+      console.log(`\n  Processing: ${row.title.slice(0, 60)}`);
+
+      let tumblrPost = row.tumblrPost?.trim() || '';
+      if (!tumblrPost) {
+        console.log(`    ℹ️  No sheet content — generating Tumblr caption for: ${row.title.slice(0, 50)}`);
+        try {
+          tumblrPost = await generateTumblrPost({ url: row.targetUrl, title: row.title, seoRanking: 999, priority: row.priority ?? 'P3', marketValue: row.marketValue });
+        } catch (genErr: any) {
+          console.log(`    ⏭ Skipping — generation failed: ${genErr.message}`);
+          continue;
+        }
+        if (!tumblrPost?.trim()) { console.log(`    ⏭ Skipping — generated content empty`); continue; }
+      }
+      const hashtagFreePost = removeTumblrHashtags(tumblrPost);
+      if (hashtagFreePost !== tumblrPost) {
+        console.log('    Removed hashtags from Tumblr caption');
+      }
+      tumblrPost = hashtagFreePost;
+      if (!tumblrPost) { console.log(`    ⏭ Skipping — caption empty after hashtag removal`); continue; }
+      row.tumblrPost = tumblrPost;
+
+      console.log(`    Posting to Tumblr (account: ${row.name})...`);
+      const postResult = await postToTumblrAccount(row.name, tumblrPost, row.targetUrl);
+
+      if (postResult.success) {
+        await saveTumblrBatchResult(row, {
+          tumblrPost,
+          tumblrPostUrl: postResult.postUrl || '',
+          tumblrStatus: 'Posted',
+          tumblrBatch: batchLabel,
+        });
+        recordPost('tumblr');
+        console.log(`    ✅ Posted → ${postResult.postUrl}`);
+        posted++;
+      } else {
+        await saveTumblrBatchResult(row, {
+          tumblrPost,
+          tumblrPostUrl: '',
+          tumblrStatus: 'Failed',
+          tumblrBatch: row.tumblrBatch || '',
+          tumblrError: postResult.error,
+        });
+        console.log(`    ❌ Failed: ${postResult.error}`);
+        failed++;
+      }
+
+      await new Promise(r => setTimeout(r, 1000));
+    } catch (err: any) {
+      const kbEntry = recordError({ rawError: err.message, platform: 'tumblr', stage: 'post', rowIndex: row.rowIndex, rowTitle: row.title, batchRun: batchNum });
+      await applyFix(kbEntry, { platform: 'tumblr', accountName: row.name, rowIndex: row.rowIndex });
+      console.error(`  ❌ Row ${row.rowIndex} [${kbEntry.classification}]: ${err.message}`);
+      try {
+        await saveTumblrBatchResult(row, {
+          tumblrPost: row.tumblrPost || '',
+          tumblrPostUrl: '',
+          tumblrStatus: 'Error',
+          tumblrBatch: row.tumblrBatch || '',
+          tumblrError: err.message,
+        });
+      } catch (saveErr: any) {
+        console.error(`  ⚠️ Row ${row.rowIndex} SHEET SAVE ALSO FAILED: ${saveErr.message}`);
+      }
+      failed++;
+    }
+  }
+
+  console.log(`\n[TUMBLR BATCH] ${batchLabel} complete: ${posted}/${rows.length} posted, ${failed} failed`);
+}
+
+// ── Instapaper Batch ─────────────────────────────────────────────────────────
+
+async function postToInstapaperAccount(accountName: string, title: string, targetUrl: string, note: string): Promise<{
+  success: boolean;
+  postUrl?: string;
+  error?: string;
+}> {
+  try {
+    const loginResult = await executeBrowserTool('login_instapaper', { nickname: accountName });
+    if (!loginResult.success) {
+      return { success: false, error: loginResult.error || 'Instapaper login failed' };
+    }
+    const postResult = await executeBrowserTool('post_instapaper', { title, targetUrl, note });
+    return { success: postResult.success ?? false, postUrl: postResult.postUrl, error: postResult.error };
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+}
+
+export async function runInstapaperBatch(batchNum: number = 1): Promise<void> {
+  const rows = await getRowsNeedingSocialSlot(1, 15);
+  if (rows.length === 0) { console.log('[INSTAPAPER BATCH] No rows available'); return; }
+
+  const batchLabel = `Batch ${batchNum}`;
+  console.log(`\n[INSTAPAPER BATCH] Starting ${batchLabel}... Found ${rows.length} rows`);
+
+  let posted = 0, failed = 0;
+  for (const row of rows) {
+    try {
+      console.log(`\n  Processing: ${row.title.slice(0, 60)}`);
+      let note = row.instapaperNote?.trim() || '';
+      if (!note) {
+        try {
+          note = await generateBookmarkNote({ url: row.targetUrl, title: row.title, marketValue: row.marketValue });
+        } catch (genErr: any) {
+          console.log(`    ⏭ Skipping — generation failed: ${genErr.message}`);
+          continue;
+        }
+      }
+      row.instapaperNote = note;
+
+      const postResult = await postToInstapaperAccount(row.name, row.title, row.targetUrl, note);
+      if (postResult.success) {
+        await saveSocialSlotResult(row.rowIndex, 1, 'Instapaper', { url: postResult.postUrl || '', status: 'Posted', batch: batchLabel });
+        console.log(`    ✅ Posted → ${postResult.postUrl}`);
+        recordPost('instapaper');
+        posted++;
+      } else {
+        await saveSocialSlotResult(row.rowIndex, 1, 'Instapaper', { url: '', status: 'Failed', batch: batchLabel, error: postResult.error });
+        console.log(`    ❌ Failed: ${postResult.error}`);
+        failed++;
+      }
+      await new Promise(r => setTimeout(r, 1000));
+    } catch (err: any) {
+      const kbEntry = recordError({ rawError: err.message, platform: 'instapaper', stage: 'post', rowIndex: row.rowIndex, rowTitle: row.title, batchRun: batchNum });
+      await applyFix(kbEntry, { platform: 'instapaper', accountName: row.name, rowIndex: row.rowIndex });
+      console.error(`  ❌ Row ${row.rowIndex} [${kbEntry.classification}]: ${err.message}`);
+      failed++;
+    }
+  }
+  console.log(`\n[INSTAPAPER BATCH] ${batchLabel} complete: ${posted}/${rows.length} posted, ${failed} failed`);
+}
+
+// ── Raindrop Batch ───────────────────────────────────────────────────────────
+
+async function postToRaindropAccount(accountName: string, title: string, targetUrl: string, note: string): Promise<{
+  success: boolean;
+  postUrl?: string;
+  error?: string;
+}> {
+  try {
+    const loginResult = await executeBrowserTool('login_raindrop', { nickname: accountName });
+    if (!loginResult.success) {
+      return { success: false, error: loginResult.error || 'Raindrop login failed' };
+    }
+    const postResult = await executeBrowserTool('post_raindrop', { title, targetUrl, note });
+    return { success: postResult.success ?? false, postUrl: postResult.postUrl, error: postResult.error };
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+}
+
+export async function runRaindropBatch(batchNum: number = 1): Promise<void> {
+  const rows = await getRowsNeedingSocialSlot(1, 15);
+  if (rows.length === 0) { console.log('[RAINDROP BATCH] No rows available'); return; }
+
+  const batchLabel = `Batch ${batchNum}`;
+  console.log(`\n[RAINDROP BATCH] Starting ${batchLabel}... Found ${rows.length} rows`);
+
+  let posted = 0, failed = 0;
+  for (const row of rows) {
+    try {
+      console.log(`\n  Processing: ${row.title.slice(0, 60)}`);
+      let note = row.raindropNote?.trim() || '';
+      if (!note) {
+        try {
+          note = await generateBookmarkNote({ url: row.targetUrl, title: row.title, marketValue: row.marketValue });
+        } catch (genErr: any) {
+          console.log(`    ⏭ Skipping — generation failed: ${genErr.message}`);
+          continue;
+        }
+      }
+      row.raindropNote = note;
+
+      const postResult = await postToRaindropAccount(row.name, row.title, row.targetUrl, note);
+      if (postResult.success) {
+        await saveSocialSlotResult(row.rowIndex, 1, 'Raindrop', { url: postResult.postUrl || '', status: 'Posted', batch: batchLabel });
+        console.log(`    ✅ Posted → ${postResult.postUrl}`);
+        recordPost('raindrop');
+        posted++;
+      } else {
+        await saveSocialSlotResult(row.rowIndex, 1, 'Raindrop', { url: '', status: 'Failed', batch: batchLabel, error: postResult.error });
+        console.log(`    ❌ Failed: ${postResult.error}`);
+        failed++;
+      }
+      await new Promise(r => setTimeout(r, 1000));
+    } catch (err: any) {
+      const kbEntry = recordError({ rawError: err.message, platform: 'raindrop', stage: 'post', rowIndex: row.rowIndex, rowTitle: row.title, batchRun: batchNum });
+      await applyFix(kbEntry, { platform: 'raindrop', accountName: row.name, rowIndex: row.rowIndex });
+      console.error(`  ❌ Row ${row.rowIndex} [${kbEntry.classification}]: ${err.message}`);
+      failed++;
+    }
+  }
+  console.log(`\n[RAINDROP BATCH] ${batchLabel} complete: ${posted}/${rows.length} posted, ${failed} failed`);
+}
+
+// ── Pearltrees Batch ─────────────────────────────────────────────────────────
+
+async function postToPearltreesAccount(accountName: string, title: string, targetUrl: string): Promise<{
+  success: boolean;
+  postUrl?: string;
+  error?: string;
+}> {
+  try {
+    const loginResult = await executeBrowserTool('login_pearltrees', { nickname: accountName });
+    if (!loginResult.success) {
+      return { success: false, error: loginResult.error || 'Pearltrees login failed' };
+    }
+    const postResult = await executeBrowserTool('post_pearltrees', { title, targetUrl });
+    return { success: postResult.success ?? false, postUrl: postResult.postUrl, error: postResult.error };
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+}
+
+export async function runPearltreesBatch(batchNum: number = 1): Promise<void> {
+  const rows = await getRowsNeedingSocialSlot(2, 15);
+  if (rows.length === 0) { console.log('[PEARLTREES BATCH] No rows available'); return; }
+
+  const batchLabel = `Batch ${batchNum}`;
+  console.log(`\n[PEARLTREES BATCH] Starting ${batchLabel}... Found ${rows.length} rows`);
+
+  let posted = 0, failed = 0;
+  for (const row of rows) {
+    try {
+      console.log(`\n  Processing: ${row.title.slice(0, 60)}`);
+      const postResult = await postToPearltreesAccount(row.name, row.title, row.targetUrl);
+      if (postResult.success) {
+        await saveSocialSlotResult(row.rowIndex, 2, 'Pearltrees', { url: postResult.postUrl || '', status: 'Posted', batch: batchLabel });
+        console.log(`    ✅ Posted → ${postResult.postUrl}`);
+        recordPost('pearltrees');
+        posted++;
+      } else {
+        await saveSocialSlotResult(row.rowIndex, 2, 'Pearltrees', { url: '', status: 'Failed', batch: batchLabel, error: postResult.error });
+        console.log(`    ❌ Failed: ${postResult.error}`);
+        failed++;
+      }
+      await new Promise(r => setTimeout(r, 1000));
+    } catch (err: any) {
+      const kbEntry = recordError({ rawError: err.message, platform: 'pearltrees', stage: 'post', rowIndex: row.rowIndex, rowTitle: row.title, batchRun: batchNum });
+      await applyFix(kbEntry, { platform: 'pearltrees', accountName: row.name, rowIndex: row.rowIndex });
+      console.error(`  ❌ Row ${row.rowIndex} [${kbEntry.classification}]: ${err.message}`);
+      failed++;
+    }
+  }
+  console.log(`\n[PEARLTREES BATCH] ${batchLabel} complete: ${posted}/${rows.length} posted, ${failed} failed`);
+}
+
+// ── Mastodon Batch ───────────────────────────────────────────────────────────
+
+async function postToMastodonAccount(accountName: string, postText: string): Promise<{
+  success: boolean;
+  postUrl?: string;
+  error?: string;
+}> {
+  try {
+    const loginResult = await executeBrowserTool('login_mastodon', { nickname: accountName });
+    if (!loginResult.success) {
+      return { success: false, error: loginResult.error || 'Mastodon login failed' };
+    }
+    const postResult = await executeBrowserTool('post_mastodon', { postText });
+    return { success: postResult.success ?? false, postUrl: postResult.postUrl, error: postResult.error };
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+}
+
+export async function runMastodonBatch(batchNum: number = 1): Promise<void> {
+  const rows = await getRowsForContinuousMastodonPosting(15);
+  if (rows.length === 0) { console.log('[MASTODON BATCH] No rows available'); return; }
+
+  const batchLabel = `Batch ${batchNum}`;
+  console.log(`\n[MASTODON BATCH] Starting ${batchLabel}... Found ${rows.length} rows`);
+
+  let posted = 0, failed = 0;
+  for (const row of rows) {
+    try {
+      console.log(`\n  Processing: ${row.title.slice(0, 60)}`);
+      let mastodonPost = row.mastodonPost?.trim() || '';
+      if (!mastodonPost) {
+        try {
+          mastodonPost = await generateMastodonPost({ url: row.targetUrl, title: row.title, marketValue: row.marketValue });
+        } catch (genErr: any) {
+          console.log(`    ⏭ Skipping — generation failed: ${genErr.message}`);
+          continue;
+        }
+      }
+      row.mastodonPost = mastodonPost;
+
+      const postResult = await postToMastodonAccount(row.name, mastodonPost);
+      if (postResult.success) {
+        await saveUnifiedMastodonResult(row, { postUrl: postResult.postUrl || '', post: mastodonPost, status: 'Posted', batch: batchLabel });
+        console.log(`    ✅ Posted → ${postResult.postUrl}`);
+        posted++;
+      } else {
+        await saveUnifiedMastodonResult(row, { postUrl: '', post: mastodonPost, status: 'Failed', batch: batchLabel, error: postResult.error });
+        console.log(`    ❌ Failed: ${postResult.error}`);
+        failed++;
+      }
+      await new Promise(r => setTimeout(r, 1000));
+    } catch (err: any) {
+      const kbEntry = recordError({ rawError: err.message, platform: 'mastodon', stage: 'post', rowIndex: row.rowIndex, rowTitle: row.title, batchRun: batchNum });
+      await applyFix(kbEntry, { platform: 'mastodon', accountName: row.name, rowIndex: row.rowIndex });
+      console.error(`  ❌ Row ${row.rowIndex} [${kbEntry.classification}]: ${err.message}`);
+      failed++;
+    }
+  }
+  console.log(`\n[MASTODON BATCH] ${batchLabel} complete: ${posted}/${rows.length} posted, ${failed} failed`);
+}
+
+// ── Telegraph Batch ──────────────────────────────────────────────────────────
+// No accounts, no login — telegra.ph opens straight into a live editor and
+// Publish mints the page instantly (confirmed live 2026-09-08, see
+// browser/telegraph/poster.ts). Shares Slot 2 of the Social Media tab with
+// Facebook/Tumblr/Pearltrees (see saveSocialSlotResult) — same
+// "Social Platform 2"/"Social URL 2" columns, no dedicated Telegraph columns.
+
+export async function runTelegraphBatch(batchNum: number = 1): Promise<void> {
+  const rows = await getRowsNeedingSocialSlot(2, 15);
+  if (rows.length === 0) { console.log('[TELEGRAPH BATCH] No rows available'); return; }
+
+  const batchLabel = `Batch ${batchNum}`;
+  console.log(`\n[TELEGRAPH BATCH] Starting ${batchLabel}... Found ${rows.length} rows`);
+
+  let posted = 0, failed = 0;
+  for (const row of rows) {
+    try {
+      console.log(`\n  Processing: ${row.title.slice(0, 60)}`);
+
+      let { title, html } = await generateTelegraphPost(row);
+      html = ensureTargetUrl(html, row.targetUrl);
+
+      console.log(`    Posting to Telegraph...`);
+      const page = await postToTelegraph(title, 'Ken Research', html);
+
+      await saveSocialSlotResult(row.rowIndex, 2, 'Telegraph', { url: page.url, status: 'Posted', batch: batchLabel });
+      recordPost('telegraph');
+      console.log(`    ✅ Posted → ${page.url}`);
+      posted++;
+    } catch (err: any) {
+      const kbEntry = recordError({ rawError: err.message, platform: 'telegraph', stage: 'post', rowIndex: row.rowIndex, rowTitle: row.title, batchRun: batchNum });
+      console.error(`  ❌ Row ${row.rowIndex} [${kbEntry.classification}]: ${err.message}`);
+      try {
+        await saveSocialSlotResult(row.rowIndex, 2, 'Telegraph', { url: '', status: 'Failed', batch: batchLabel, error: err.message });
+      } catch (saveErr: any) {
+        console.error(`  ⚠️ Row ${row.rowIndex} SHEET SAVE ALSO FAILED: ${saveErr.message}`);
+      }
+      failed++;
+    }
+  }
+  console.log(`\n[TELEGRAPH BATCH] ${batchLabel} complete: ${posted}/${rows.length} posted, ${failed} failed`);
+}
+
+// ── PdfHost Batch ─────────────────────────────────────────────────────────────
+
+export async function runPdfhostBatch(batchNum: number = 1): Promise<void> {
+  const rows = await getRowsForContinuousPdfhostPosting(15);
+  if (rows.length === 0) { console.log('[PDFHOST BATCH] No rows available'); return; }
+
+  const batchLabel = `Batch ${batchNum}`;
+  console.log(`\n[PDFHOST BATCH] Starting ${batchLabel}... Found ${rows.length} rows`);
+
+  let posted = 0, failed = 0;
+  for (const row of rows) {
+    const pdfTitle = row.title || row.descriptionTitle || '';
+    const content = row.blogContent || '';
+    if (!content) { console.log(`  ⏭ Skipping row ${row.rowIndex} — no blog content`); continue; }
+
+    try {
+      let pdfPath = row.pdfPath?.trim();
+      if (!pdfPath) {
+        pdfPath = await htmlToPdf(content, makeSlug(pdfTitle), row.rowIndex);
+        await savePdfPath(row, pdfPath, undefined, 'newLogic').catch(() => {});
+      }
+      const page = await loginToPdfHost({ nickname: row.name });
+      const r = await postToPdfHost(page, pdfPath, pdfTitle, pdfTitle);
+      await saveSlotResult(row.rowIndex, 2, 'PdfHost', { url: r.postUrl, status: 'Posted', batch: batchLabel });
+      console.log(`  ✅ Posted → ${r.postUrl}`);
+      recordPost('pdfhost');
+      posted++;
+    } catch (err: any) {
+      const kbEntry = recordError({ rawError: err.message, platform: 'pdfhost', stage: 'post', rowIndex: row.rowIndex, rowTitle: row.title, batchRun: batchNum });
+      await applyFix(kbEntry, { platform: 'pdfhost', accountName: row.name, rowIndex: row.rowIndex });
+      await saveSlotResult(row.rowIndex, 2, 'PdfHost', { url: '', status: 'Failed', batch: batchLabel, error: err.message });
+      console.error(`  ❌ Row ${row.rowIndex} [${kbEntry.classification}]: ${err.message}`);
+      failed++;
+    } finally {
+      await closePdfHostBrowser();
+    }
+    await new Promise(r => setTimeout(r, 1000));
+  }
+  console.log(`\n[PDFHOST BATCH] ${batchLabel} complete: ${posted}/${rows.length} posted, ${failed} failed`);
+}
+
+// ── Scribd Batch ──────────────────────────────────────────────────────────────
+
+export async function runScribdBatch(batchNum: number = 1): Promise<void> {
+  const rows = await getRowsForContinuousScribdPosting(15);
+  if (rows.length === 0) { console.log('[SCRIBD BATCH] No rows available'); return; }
+
+  const batchLabel = `Batch ${batchNum}`;
+  console.log(`\n[SCRIBD BATCH] Starting ${batchLabel}... Found ${rows.length} rows`);
+
+  let posted = 0, failed = 0;
+  for (const row of rows) {
+    const pdfTitle = row.title || row.descriptionTitle || '';
+    const content = row.blogContent || '';
+    if (!content) { console.log(`  ⏭ Skipping row ${row.rowIndex} — no blog content`); continue; }
+
+    try {
+      let pdfPath = row.pdfPath?.trim();
+      if (!pdfPath) {
+        pdfPath = await htmlToPdf(content, makeSlug(pdfTitle), row.rowIndex);
+        await savePdfPath(row, pdfPath, undefined, 'newLogic').catch(() => {});
+      }
+      const page = await loginToScribd({ nickname: row.name });
+      const r = await postToScribd(page, pdfPath, pdfTitle, row.targetUrl);
+      await saveSlotResult(row.rowIndex, 1, 'Scribd', { url: r.postUrl, status: 'Posted', batch: batchLabel });
+      console.log(`  ✅ Posted → ${r.postUrl}`);
+      recordPost('scribd');
+      posted++;
+    } catch (err: any) {
+      const kbEntry = recordError({ rawError: err.message, platform: 'scribd', stage: 'post', rowIndex: row.rowIndex, rowTitle: row.title, batchRun: batchNum });
+      await applyFix(kbEntry, { platform: 'scribd', accountName: row.name, rowIndex: row.rowIndex });
+      await saveSlotResult(row.rowIndex, 1, 'Scribd', { url: '', status: 'Failed', batch: batchLabel, error: err.message });
+      console.error(`  ❌ Row ${row.rowIndex} [${kbEntry.classification}]: ${err.message}`);
+      failed++;
+    } finally {
+      await closeScribdBrowser();
+    }
+    await new Promise(r => setTimeout(r, 1000));
+  }
+  console.log(`\n[SCRIBD BATCH] ${batchLabel} complete: ${posted}/${rows.length} posted, ${failed} failed`);
+}
+
+// ── 4shared Batch ─────────────────────────────────────────────────────────────
+
+export async function runFourSharedBatch(batchNum: number = 1): Promise<void> {
+  const rows = await getRowsForContinuousFourSharedPosting(15);
+  if (rows.length === 0) { console.log('[4SHARED BATCH] No rows available'); return; }
+
+  const batchLabel = `Batch ${batchNum}`;
+  console.log(`\n[4SHARED BATCH] Starting ${batchLabel}... Found ${rows.length} rows`);
+
+  let posted = 0, failed = 0;
+  for (const row of rows) {
+    const pdfTitle = row.title || row.descriptionTitle || '';
+    const content = row.blogContent || '';
+    if (!content) { console.log(`  ⏭ Skipping row ${row.rowIndex} — no blog content`); continue; }
+
+    try {
+      let pdfPath = row.pdfPath?.trim();
+      if (!pdfPath) {
+        pdfPath = await htmlToPdf(content, makeSlug(pdfTitle), row.rowIndex);
+        await savePdfPath(row, pdfPath, undefined, 'newLogic').catch(() => {});
+      }
+      const page = await loginToFourShared({ nickname: row.name });
+      const r = await postToFourShared(page, pdfPath, row.targetUrl);
+      await saveSlotResult(row.rowIndex, 3, '4shared', { url: r.postUrl, status: 'Posted', batch: batchLabel });
+      console.log(`  ✅ Posted → ${r.postUrl}`);
+      recordPost('fourshared');
+      posted++;
+    } catch (err: any) {
+      const kbEntry = recordError({ rawError: err.message, platform: 'fourshared', stage: 'post', rowIndex: row.rowIndex, rowTitle: row.title, batchRun: batchNum });
+      await applyFix(kbEntry, { platform: 'fourshared', accountName: row.name, rowIndex: row.rowIndex });
+      await saveSlotResult(row.rowIndex, 3, '4shared', { url: '', status: 'Failed', batch: batchLabel, error: err.message });
+      console.error(`  ❌ Row ${row.rowIndex} [${kbEntry.classification}]: ${err.message}`);
+      failed++;
+    } finally {
+      await closeFourSharedBrowser();
+    }
+    await new Promise(r => setTimeout(r, 1000));
+  }
+  console.log(`\n[4SHARED BATCH] ${batchLabel} complete: ${posted}/${rows.length} posted, ${failed} failed`);
+}
+
 // ── LI Batch ───────────────────────────────────────────────────────────────────
 
 /**
  * Run LI batch: pick rows → SEO check → generate LI post → post → save all
  */
 export async function runLiBatch(options?: { manual?: boolean }, batchNum: number = 1): Promise<void> {
-  const rows = await getRowsForContinuousLiPosting(15);
+  const rows = await getRowsNeedingSocialSlot(1, 15);
 
   if (rows.length === 0) {
     console.log('[LI BATCH] No rows available');
@@ -450,34 +1183,57 @@ export async function runLiBatch(options?: { manual?: boolean }, batchNum: numbe
     try {
       console.log(`\n  Processing: ${row.title.slice(0, 60)}`);
 
-      // 1. Read SEO data from sheet (X batch writes SEO columns → no re-analysis here)
-      const seoData = {
-        seoRanking: parseInt(row.seoPage || '99') || 99,
-        priority: row.priority || 'P1',
-      };
-      console.log(`    SEO (from sheet): Page ${row.seoPage || 'N/A'} | Priority: ${seoData.priority}`);
-
-      // 2. Generate LI post
-      console.log(`    Generating LI content...`);
-      const liPost = await generateLiPost({
-        url: row.targetUrl,
-        title: row.title,
-        seoRanking: seoData.seoRanking,
-        priority: seoData.priority,
-      });
+      // Use sheet content if available, otherwise generate — but never
+      // regenerate when LinkedIn Status already says "Generated" (content
+      // was prepared ahead of time by the standalone generate script).
+      let liPost = row.linkedinPost?.trim() || '';
+      const liAlreadyGenerated = (row.linkedinStatus || '').trim().toLowerCase() === 'generated';
+      if (!liPost) {
+        if (liAlreadyGenerated) {
+          console.log(`    ⏭ Skipping — LinkedIn Status is "Generated" but LinkedIn Post is empty (row ${row.rowIndex})`);
+          continue;
+        }
+        console.log(`    ℹ️  No sheet content — generating LI post for: ${row.title.slice(0, 50)}`);
+        try {
+          liPost = await generateLiPost({ url: row.targetUrl, title: row.title, seoRanking: 999, priority: row.priority ?? 'P3' });
+        } catch (genErr: any) {
+          console.log(`    ⏭ Skipping — generation failed: ${genErr.message}`);
+          continue;
+        }
+        if (!liPost?.trim()) { console.log(`    ⏭ Skipping — generated content empty`); continue; }
+      } else if (liPost.length > MAX_POST_LENGTH || hasUnfilledPlaceholder(liPost)) {
+        console.log(`    ⚠️  Sanity: sheet LI post ${hasUnfilledPlaceholder(liPost) ? 'has an unfilled placeholder' : `is ${liPost.length} chars (over ${MAX_POST_LENGTH})`} — regenerating`);
+        try {
+          liPost = await generateLiPost({ url: row.targetUrl, title: row.title, seoRanking: 999, priority: row.priority ?? 'P3' });
+        } catch (genErr: any) {
+          console.log(`    ⏭ Skipping — regeneration failed: ${genErr.message}`);
+          continue;
+        }
+        if (!liPost?.trim()) { console.log(`    ⏭ Skipping — regenerated content empty`); continue; }
+      }
       row.linkedinPost = liPost;
 
-      // 3. Post to LI
-      console.log(`    Posting to LI (account: ${row.name})...`);
-      const postResult = await postToLiAccount(row.name, liPost);
+      // 3. Inject UTM into post content
+      liPost = injectUTM(liPost, UTM_PARAMS.LinkedIn);
+      row.linkedinPost = liPost;
+
+      // 4. Post to LI — carousel if Images URL present, else normal
+      const pdfPath = (row.imagesUrl || '').trim();
+      console.log(`    Posting to LI (account: ${row.name})${pdfPath ? ' [CAROUSEL]' : ''}...`);
+      const postResult = pdfPath
+        ? await postToLiAccountCarousel(row.name, liPost, pdfPath)
+        : await postToLiAccount(row.name, liPost);
 
       if (postResult.success) {
+        liPost = postResult.postText || liPost;
+        row.linkedinPost = liPost;
         await saveLiBatchResult(row, {
           liPost,
           liPostUrl: postResult.postUrl || '',
           liStatus: 'Posted',
           liBatch: batchLabel,
         });
+        recordPost('li');
         console.log(`    ✅ Posted → ${postResult.postUrl}`);
         posted++;
       } else {
@@ -519,18 +1275,60 @@ export async function runLiBatch(options?: { manual?: boolean }, batchNum: numbe
 async function postToLiAccount(accountName: string, postText: string): Promise<{
   success: boolean;
   postUrl?: string;
+  postText?: string;
   error?: string;
 }> {
   try {
-    const loginResult = await executeBrowserTool('login_linkedin', { nickname: accountName });
+    const loginResult = await withTimeout(
+      executeBrowserTool('login_linkedin', { nickname: accountName }),
+      2 * 60 * 1000, `LI login:${accountName}`,
+      () => closeLiSession(accountName)
+    );
     if (!loginResult.success) {
       return { success: false, error: loginResult.error || 'LinkedIn login failed' };
     }
 
-    const postResult = await executeBrowserTool('post_linkedin', { postText });
+    const postResult = await withTimeout(
+      executeBrowserTool('post_linkedin', { nickname: accountName, postText }),
+      3 * 60 * 1000, `LI post:${accountName}`,
+      () => closeLiSession(accountName)
+    );
     return {
       success: postResult.success ?? false,
       postUrl: postResult.postUrl,
+      postText: postResult.postText,
+      error: postResult.error,
+    };
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+}
+
+async function postToLiAccountCarousel(accountName: string, postText: string, pdfPath: string): Promise<{
+  success: boolean;
+  postUrl?: string;
+  postText?: string;
+  error?: string;
+}> {
+  try {
+    const loginResult = await withTimeout(
+      executeBrowserTool('login_linkedin', { nickname: accountName }),
+      2 * 60 * 1000, `LI login:${accountName}`,
+      () => closeLiSession(accountName)
+    );
+    if (!loginResult.success) {
+      return { success: false, error: loginResult.error || 'LinkedIn login failed' };
+    }
+
+    const postResult = await withTimeout(
+      executeBrowserTool('post_linkedin_carousel', { nickname: accountName, postText, pdfPath }),
+      3 * 60 * 1000, `LI carousel post:${accountName}`,
+      () => closeLiSession(accountName)
+    );
+    return {
+      success: postResult.success ?? false,
+      postUrl: postResult.postUrl,
+      postText: postResult.postText,
       error: postResult.error,
     };
   } catch (err: any) {
@@ -543,11 +1341,11 @@ async function postToLiAccount(accountName: string, postText: string): Promise<{
 /**
  * Run Medium batch: pick rows → SEO check → generate Medium post (HTML) → post → save all
  */
-export async function runMediumBatch(batchNum: number = 1): Promise<void> {
+export async function runMediumBatch(batchNum: number = 1, rowsOverride?: SheetRow[]): Promise<void> {
   // Medium uses BLOG sheet
   console.log(`\n[MEDIUM BATCH] Checking for rows ready to post...`);
 
-  const rows = await getRowsForContinuousMediumPosting(15);
+  const rows = rowsOverride ?? await getRowsForContinuousMediumPosting(25);
 
   if (rows.length === 0) {
     console.log('[MEDIUM BATCH] No rows available (all posted recently, no new rows)');
@@ -570,12 +1368,17 @@ export async function runMediumBatch(batchNum: number = 1): Promise<void> {
 
       // 2. Generate Medium post (uses pre-written Blog Content from sheet)
       console.log(`    Preparing Medium content...`);
-      const mediumPost = await generateMediumPost(row);
+      let mediumPost = await generateMediumPost(row);
+      mediumPost = ensureTargetUrl(mediumPost, row.targetUrl);
       row.mediumPost = mediumPost;
 
-      // 3. Post to Medium
-      console.log(`    Posting to Medium (account: ${row.name})...`);
-      const postResult = await postToMediumAccount(row.name, row.descriptionTitle || '', mediumPost);
+      // 3. Post to Medium — always use "New Name" column, never Name.
+      const mediumNickname = (row.newName || '').trim();
+      if (!mediumNickname) {
+        throw new Error(`Row ${row.rowIndex}: "New Name" column is empty — cannot post to Medium`);
+      }
+      console.log(`    Posting to Medium (account: ${mediumNickname})...`);
+      const postResult = await postToMediumAccount(mediumNickname, row.title || '', mediumPost);
 
       if (postResult.success) {
 
@@ -585,6 +1388,7 @@ export async function runMediumBatch(batchNum: number = 1): Promise<void> {
           mediumStatus: 'Posted',
           mediumBatch: batchLabel,
         });
+        recordPost('medium');
         console.log(`    ✅ Posted → ${postResult.postUrl}`);
         posted++;
       } else {
@@ -595,14 +1399,15 @@ export async function runMediumBatch(batchNum: number = 1): Promise<void> {
           mediumBatch: row.mediumBatch || '',  // Keep existing batch, don't assign new one
           mediumError: postResult.error,
         });
-        console.log(`    ❌ Failed: ${postResult.error}`);
+        await unclaimGroupRow(row.rowIndex, row.sheetType === 'pool' ? 'pool' : 'newLogic').catch(() => {});
+        console.log(`    ❌ Failed: ${postResult.error} — row unclaimed for retry`);
         failed++;
       }
 
       await new Promise(r => setTimeout(r, 1000));
     } catch (err: any) {
       const kbEntry = recordError({ rawError: err.message, platform: 'medium', stage: 'post', rowIndex: row.rowIndex, rowTitle: row.title, batchRun: batchNum });
-      await applyFix(kbEntry, { platform: 'medium', accountName: row.name, rowIndex: row.rowIndex });
+      await applyFix(kbEntry, { platform: 'medium', accountName: row.newName, rowIndex: row.rowIndex });
       console.error(`  ❌ Row ${row.rowIndex} [${kbEntry.classification}]: ${err.message}`);
       try {
         await saveMediumBatchResult(row, {
@@ -612,6 +1417,7 @@ export async function runMediumBatch(batchNum: number = 1): Promise<void> {
           mediumBatch: row.mediumBatch || '',  // Keep existing batch, don't assign new one
           mediumError: err.message,
         });
+        await unclaimGroupRow(row.rowIndex, row.sheetType === 'pool' ? 'pool' : 'newLogic').catch(() => {});
       } catch (saveErr: any) {
         console.error(`  ⚠️ Row ${row.rowIndex} SHEET SAVE ALSO FAILED: ${saveErr.message}`);
       }
@@ -660,10 +1466,10 @@ async function postToMediumAccount(accountName: string, title: string, htmlConte
  * Content Format: HTML (from "Linkmate Content" column)
  * Limit: 3 batches/day (14:45, 16:45, 18:45 IST)
  */
-export async function runLinkmateBatch(batchNum: number = 1): Promise<void> {
+export async function runLinkmateBatch(batchNum: number = 1, rowsOverride?: SheetRow[]): Promise<void> {
   console.log(`\n[LINKMATE BATCH] Starting...`);
 
-  const rows = await getRowsForContinuousLinkmatePosting(15);
+  const rows = rowsOverride ?? await getRowsForContinuousLinkmatePosting(15);
 
   if (rows.length === 0) {
     console.log('[LINKMATE BATCH] No rows available (all posted recently, no new rows)');
@@ -682,7 +1488,8 @@ export async function runLinkmateBatch(batchNum: number = 1): Promise<void> {
       console.log(`\n  Processing: ${row.title.slice(0, 60)}`);
 
       // Linkmate Content — read from sheet + inject correct platform UTM
-      const linkMateContent = await generateLinkmatePost(row);
+      let linkMateContent = await generateLinkmatePost(row);
+      linkMateContent = ensureTargetUrl(linkMateContent, row.targetUrl);
       if (!linkMateContent) {
         console.warn(`    ⚠️  No Content (HTML) found — skipping`);
         failed++;
@@ -691,24 +1498,23 @@ export async function runLinkmateBatch(batchNum: number = 1): Promise<void> {
 
       // Post to Linkmate
       console.log(`    Posting to Linkmate (account: ${row.name})...`);
-      const postResult = await postToLinkmateAccount(row.name, row.descriptionTitle || '', linkMateContent, row.seedKeyword);
+      const postResult = await postToLinkmateAccount(row.name, row.title || '', linkMateContent, row.seedKeyword);
 
       if (postResult.success) {
-        await saveLinkmateBatchResult(row, {
-          linkMateContent,
-          linkMatePostUrl: postResult.postUrl || '',
-          linkMateStatus: 'Posted',
-          linkmateBatch: batchLabel,
+        await saveSlotResult(row.rowIndex, 1, 'Linkmate', {
+          url: postResult.postUrl || '',
+          status: 'Posted',
+          batch: batchLabel,
         });
+        recordPost('linkmate');
         console.log(`    ✅ Posted → ${postResult.postUrl}`);
         posted++;
       } else {
-        await saveLinkmateBatchResult(row, {
-          linkMateContent,
-          linkMatePostUrl: '',
-          linkMateStatus: 'Failed',
-          linkmateBatch: batchLabel,
-          linkMateError: postResult.error,
+        await saveSlotResult(row.rowIndex, 1, 'Linkmate', {
+          url: '',
+          status: 'Failed',
+          batch: batchLabel,
+          error: postResult.error,
         });
         console.log(`    ❌ Failed: ${postResult.error}`);
         failed++;
@@ -720,12 +1526,11 @@ export async function runLinkmateBatch(batchNum: number = 1): Promise<void> {
       await applyFix(kbEntry, { platform: 'linkmate', accountName: row.name, rowIndex: row.rowIndex });
       console.error(`  ❌ Row ${row.rowIndex} [${kbEntry.classification}]: ${err.message}`);
       try {
-        await saveLinkmateBatchResult(row, {
-          linkMateContent: row.linkMateContent || '',
-          linkMatePostUrl: '',
-          linkMateStatus: 'Error',
-          linkmateBatch: batchLabel,
-          linkMateError: err.message,
+        await saveSlotResult(row.rowIndex, 1, 'Linkmate', {
+          url: '',
+          status: 'Error',
+          batch: batchLabel,
+          error: err.message,
         });
       } catch (saveErr: any) {
         console.error(`  ⚠️ Row ${row.rowIndex} SHEET SAVE ALSO FAILED: ${saveErr.message}`);
@@ -769,10 +1574,10 @@ async function postToLinkmateAccount(accountName: string, title: string, htmlCon
 /**
  * Run Google Sites batch: pick rows → SEO check → generate Google Sites post (HTML) → post → save all
  */
-export async function runGoogleSiteBatch(batchNum: number = 1): Promise<void> {
+export async function runGoogleSiteBatch(batchNum: number = 1, rowsOverride?: SheetRow[]): Promise<void> {
   console.log(`\n[GOOGLE SITES BATCH] Starting...`);
 
-  const rows = await getRowsForContinuousGoogleSitePosting(15);
+  const rows = rowsOverride ?? await getRowsForContinuousGoogleSitePosting(25);
 
   if (rows.length === 0) {
     console.log('[GOOGLE SITES BATCH] No rows available (all posted recently, no new rows)');
@@ -796,12 +1601,17 @@ export async function runGoogleSiteBatch(batchNum: number = 1): Promise<void> {
 
       // 1. Generate Google Sites post (uses pre-written Blog Content from sheet)
       console.log(`    Preparing Google Sites content...`);
-      const googleSitePost = await generateGoogleSitePost(row);
+      let googleSitePost = await generateGoogleSitePost(row);
+      googleSitePost = ensureTargetUrl(googleSitePost, row.targetUrl);
       row.googleSitePost = googleSitePost;
 
-      // 3. Post to Google Sites
-      console.log(`    Posting to Google Sites (account: ${row.name})...`);
-      const postResult = await postToGoogleSiteAccount(row.name, row.descriptionTitle || '', googleSitePost, row.seedKeyword);
+      // 3. Post to Google Sites — always use "New Name" column, never Name
+      const googleSiteNickname = (row.newName || '').trim();
+      if (!googleSiteNickname) {
+        throw new Error(`Row ${row.rowIndex}: "New Name" column is empty — cannot post to Google Sites`);
+      }
+      console.log(`    Posting to Google Sites (account: ${googleSiteNickname})...`);
+      const postResult = await postToGoogleSiteAccount(googleSiteNickname, row.title || '', googleSitePost, row.seedKeyword);
 
       if (postResult.success) {
         await saveGoogleSiteBatchResult(row, {
@@ -810,6 +1620,7 @@ export async function runGoogleSiteBatch(batchNum: number = 1): Promise<void> {
           googleSiteStatus: 'Posted',
           googleSiteBatch: batchLabel,
         });
+        recordPost('googlesite');
         console.log(`    ✅ Posted → ${postResult.postUrl}`);
         posted++;
       } else {
@@ -827,7 +1638,7 @@ export async function runGoogleSiteBatch(batchNum: number = 1): Promise<void> {
       await new Promise(r => setTimeout(r, 1000));
     } catch (err: any) {
       const kbEntry = recordError({ rawError: err.message, platform: 'googlesite', stage: 'post', rowIndex: row.rowIndex, rowTitle: row.title, batchRun: batchNum });
-      await applyFix(kbEntry, { platform: 'googlesite', accountName: row.name, rowIndex: row.rowIndex });
+      await applyFix(kbEntry, { platform: 'googlesite', accountName: row.newName, rowIndex: row.rowIndex });
       console.error(`  ❌ Row ${row.rowIndex} [${kbEntry.classification}]: ${err.message}`);
       try {
         await saveGoogleSiteBatchResult(row, {
@@ -847,6 +1658,13 @@ export async function runGoogleSiteBatch(batchNum: number = 1): Promise<void> {
   console.log(`\n[GOOGLE SITES BATCH] ${batchLabel} complete: ${posted}/${rows.length} posted, ${failed} failed`);
 }
 
+// Google Sites is now tracked per-account (googleSitePages map in
+// browserTools.ts + contexts map in browser/googlesite/login.ts), the same
+// pattern Facebook/LinkedIn already use — so two accounts posting at the same
+// moment (e.g. Group4's tail end overlapping Group4b, or a manual retry
+// landing mid-batch) each get their own browser and can never touch each
+// other's session. No queue/lock needed here.
+
 // Helper: Post to single Google Sites account
 async function postToGoogleSiteAccount(accountName: string, title: string, htmlContent: string, seedKeyword?: string): Promise<{
   success: boolean;
@@ -860,6 +1678,7 @@ async function postToGoogleSiteAccount(accountName: string, title: string, htmlC
     }
 
     const postResult = await executeBrowserTool('post_googlesite', {
+      nickname: accountName,
       title,
       htmlContent,
       seedKeyword
@@ -879,10 +1698,10 @@ async function postToGoogleSiteAccount(accountName: string, title: string, htmlC
 /**
  * Run Dev.to batch: pick rows → SEO check → generate Dev.to post (HTML) → post → save all
  */
-export async function runDevtoBatch(batchNum: number = 1): Promise<void> {
+export async function runDevtoBatch(batchNum: number = 1, rowsOverride?: SheetRow[]): Promise<void> {
   console.log(`\n[DEV.TO BATCH] Starting...`);
 
-  const rows = await getRowsForContinuousDevtoPosting(15);
+  const rows = rowsOverride ?? await getRowsForContinuousDevtoPosting(15);
 
   if (rows.length === 0) {
     console.log('[DEV.TO BATCH] No rows available (all posted recently, no new rows)');
@@ -905,25 +1724,27 @@ export async function runDevtoBatch(batchNum: number = 1): Promise<void> {
 
       // 2. Generate Dev.to post (uses pre-written Blog Content from sheet)
       console.log(`    Preparing Dev.to content...`);
-      const devtoPost = await generateDevtoPost(row);
+      let devtoPost = await generateDevtoPost(row);
+      devtoPost = ensureTargetUrl(devtoPost, row.targetUrl);
 
       // 3. Post to Dev.to
       console.log(`    Posting to Dev.to (account: ${row.name})...`);
-      const postResult = await postToDevtoAccount(row.name, row.descriptionTitle || '', devtoPost);
+      const postResult = await postToDevtoAccount(row.name, row.title || '', devtoPost);
 
       if (postResult.success) {
-        await saveDevtoBatchResult(row, {
-          devtoPostUrl: postResult.postUrl || '',
-          devtoStatus: 'Posted',
-          devtoBatch: batchLabel,
+        await saveSlotResult(row.rowIndex, 3, 'Dev.to', {
+          url: postResult.postUrl || '',
+          status: 'Posted',
+          batch: batchLabel,
         });
+        recordPost('devto');
         posted++;
       } else {
-        await saveDevtoBatchResult(row, {
-          devtoPostUrl: '',
-          devtoStatus: 'Failed',
-          devtoBatch: row.devtoBatch || '',
-          devtoError: postResult.error || 'Unknown error',
+        await saveSlotResult(row.rowIndex, 3, 'Dev.to', {
+          url: '',
+          status: 'Failed',
+          batch: batchLabel,
+          error: postResult.error || 'Unknown error',
         });
         failed++;
       }
@@ -932,11 +1753,11 @@ export async function runDevtoBatch(batchNum: number = 1): Promise<void> {
       await applyFix(kbEntry, { platform: 'devto', accountName: row.name, rowIndex: row.rowIndex });
       console.error(`  ❌ Row ${row.rowIndex} [${kbEntry.classification}]: ${err.message}`);
       try {
-        await saveDevtoBatchResult(row, {
-          devtoPostUrl: '',
-          devtoStatus: 'Error',
-          devtoBatch: row.devtoBatch || '',
-          devtoError: err.message,
+        await saveSlotResult(row.rowIndex, 3, 'Dev.to', {
+          url: '',
+          status: 'Error',
+          batch: batchLabel,
+          error: err.message,
         });
       } catch (saveErr: any) {
         console.error(`  ⚠️ Row ${row.rowIndex} SHEET SAVE ALSO FAILED: ${saveErr.message}`);
@@ -981,10 +1802,10 @@ async function postToDevtoAccount(accountName: string, title: string, htmlConten
  * IMPORTANT: LinkedIn account name is read from row.name (must match LinkedIn account nickname in .accounts)
  * Logs in once and reuses session for all posts in the batch
  */
-export async function runLinkedinPulseBatch(batchNum: number = 1): Promise<void> {
+export async function runLinkedinPulseBatch(batchNum: number = 1, rowsOverride?: SheetRow[]): Promise<void> {
   console.log(`\n[LINKEDIN PULSE BATCH] Starting...`);
 
-  const rows = await getRowsForContinuousLinkedinPulsePosting(15);
+  const rows = rowsOverride ?? await getRowsForContinuousLinkedinPulsePosting(15);
 
   if (rows.length === 0) {
     console.log('[LINKEDIN PULSE BATCH] No rows available (all posted recently, no new rows)');
@@ -1023,32 +1844,39 @@ export async function runLinkedinPulseBatch(batchNum: number = 1): Promise<void>
 
         // 2. Generate LinkedIn Pulse article (uses pre-written content from sheet)
         console.log(`      Preparing LinkedIn Pulse article...`);
-        const pulseContent = await generateLinkedinPulsePost(row);
+        let pulseContent = await generateLinkedinPulsePost(row);
+        pulseContent.html = ensureTargetUrl(pulseContent.html, row.targetUrl);
+
+        // Title → Blog Title column; SEO title → same Blog Title column; Share box → Blog Caption
+        const pulseTitle = (row.title || '').trim() || pulseContent.title;
+        const pulseCaption = (row.blogCaption || '').trim() || pulseContent.seoDescription;
 
         // 3. Post to LinkedIn Pulse
         console.log(`      Posting to LinkedIn Pulse...`);
         const postResult = await postToPulseAccount(
           accountName,
-          pulseContent.title,
+          pulseTitle,
           pulseContent.html,
-          pulseContent.seoTitle,
-          pulseContent.seoDescription
+          pulseTitle,
+          pulseContent.seoDescription,
+          pulseCaption
         );
 
         if (postResult.success) {
-          await saveLinkedinPulseBatchResult(row, {
-            linkedinPulsePostUrl: postResult.postUrl || '',
-            linkedinPulseStatus: 'Posted',
-            linkedinPulseBatch: batchLabel,
+          await saveSlotResult(row.rowIndex, 2, 'LinkedIn Pulse', {
+            url: postResult.postUrl || '',
+            status: 'Posted',
+            batch: batchLabel,
           });
+          recordPost('linkedinpulse');
           console.log(`      ✅ Posted → ${postResult.postUrl}`);
           posted++;
         } else {
-          await saveLinkedinPulseBatchResult(row, {
-            linkedinPulsePostUrl: '',
-            linkedinPulseStatus: 'Failed',
-            linkedinPulseBatch: row.linkedinPulseBatch || '',
-            linkedinPulseError: postResult.error,
+          await saveSlotResult(row.rowIndex, 2, 'LinkedIn Pulse', {
+            url: '',
+            status: 'Failed',
+            batch: batchLabel,
+            error: postResult.error,
           });
           console.log(`      ❌ Failed: ${postResult.error}`);
           failed++;
@@ -1060,11 +1888,11 @@ export async function runLinkedinPulseBatch(batchNum: number = 1): Promise<void>
         await applyFix(kbEntry, { platform: 'linkedin', accountName: row.name, rowIndex: row.rowIndex });
         console.error(`      ❌ Row ${row.rowIndex} [${kbEntry.classification}]: ${err.message}`);
         try {
-          await saveLinkedinPulseBatchResult(row, {
-            linkedinPulsePostUrl: '',
-            linkedinPulseStatus: 'Error',
-            linkedinPulseBatch: row.linkedinPulseBatch || '',
-            linkedinPulseError: err.message,
+          await saveSlotResult(row.rowIndex, 2, 'LinkedIn Pulse', {
+            url: '',
+            status: 'Error',
+            batch: batchLabel,
+            error: err.message,
           });
         } catch (saveErr: any) {
           console.error(`      ⚠️ Row ${row.rowIndex} SHEET SAVE ALSO FAILED: ${saveErr.message}`);
@@ -1087,7 +1915,8 @@ async function postToPulseAccount(
   title: string,
   htmlContent: string,
   seoTitle?: string,
-  seoDescription?: string
+  seoDescription?: string,
+  shareCaption?: string
 ): Promise<{
   success: boolean;
   postUrl?: string;
@@ -1105,6 +1934,7 @@ async function postToPulseAccount(
       htmlContent,
       seoTitle,
       seoDescription,
+      shareCaption,
     });
     return {
       success: postResult.success ?? false,
@@ -1124,10 +1954,10 @@ async function postToPulseAccount(
  * Content Format: HTML (from "Content" column)
  * Limit: 2 batches/day (11:45, 15:45 IST)
  */
-export async function runCalisthenicsNBatch(batchNum: number = 1): Promise<void> {
+export async function runCalisthenicsNBatch(batchNum: number = 1, rowsOverride?: SheetRow[]): Promise<void> {
   console.log(`\n[CALISTHENICS BATCH] Starting...`);
 
-  const rows = await getRowsForContinuousCalisthenicsPosting(15);
+  const rows = rowsOverride ?? await getRowsForContinuousCalisthenicsPosting(15);
 
   if (rows.length === 0) {
     console.log('[CALISTHENICS BATCH] No rows available');
@@ -1150,26 +1980,28 @@ export async function runCalisthenicsNBatch(batchNum: number = 1): Promise<void>
 
       // 2. Generate Calisthenics article (uses pre-written Blog Content from sheet)
       console.log(`    Preparing Calisthenics content...`);
-      const calisthenicsContent = await generateCalisthenicsPost(row);
+      let calisthenicsContent = await generateCalisthenicsPost(row);
+      calisthenicsContent = ensureTargetUrl(calisthenicsContent, row.targetUrl);
 
       // 3. Post to Calisthenics
       console.log(`    Posting to Calisthenics (account: ${row.name})...`);
-      const postResult = await postToCalisthenicsAccount(row.name, row.descriptionTitle || '', calisthenicsContent, row.seedKeyword);
+      const postResult = await postToCalisthenicsAccount(row.name, row.title || '', calisthenicsContent, row.seedKeyword);
 
       if (postResult.success) {
-        await saveCalisthenicsResultBatch(row, {
-          calisthenicsPostUrl: postResult.postUrl || '',
-          calisthenicsStatus: 'Posted',
-          calisthenicssBatch: batchLabel,
+        await saveSlotResult(row.rowIndex, 2, 'Calisthenics', {
+          url: postResult.postUrl || '',
+          status: 'Posted',
+          batch: batchLabel,
         });
+        recordPost('calisthenics');
         console.log(`    ✅ Posted → ${postResult.postUrl}`);
         posted++;
       } else {
-        await saveCalisthenicsResultBatch(row, {
-          calisthenicsPostUrl: '',
-          calisthenicsStatus: 'Failed',
-          calisthenicssBatch: row.calisthenicsNBatch || '',
-          calisthenicsError: postResult.error,
+        await saveSlotResult(row.rowIndex, 2, 'Calisthenics', {
+          url: '',
+          status: 'Failed',
+          batch: batchLabel,
+          error: postResult.error,
         });
         console.log(`    ❌ Failed: ${postResult.error}`);
         failed++;
@@ -1181,11 +2013,11 @@ export async function runCalisthenicsNBatch(batchNum: number = 1): Promise<void>
       await applyFix(kbEntry, { platform: 'calisthenics', accountName: row.name, rowIndex: row.rowIndex });
       console.error(`  ❌ Row ${row.rowIndex} [${kbEntry.classification}]: ${err.message}`);
       try {
-        await saveCalisthenicsResultBatch(row, {
-          calisthenicsPostUrl: '',
-          calisthenicsStatus: 'Error',
-          calisthenicssBatch: row.calisthenicsNBatch || '',
-          calisthenicsError: err.message,
+        await saveSlotResult(row.rowIndex, 2, 'Calisthenics', {
+          url: '',
+          status: 'Error',
+          batch: batchLabel,
+          error: err.message,
         });
       } catch (saveErr: any) {
         console.error(`  ⚠️ Row ${row.rowIndex} SHEET SAVE ALSO FAILED: ${saveErr.message}`);
@@ -1224,9 +2056,10 @@ export async function runSubstackBatch(batchNum: number = 1): Promise<void> {
       console.log(`\n  Processing: ${row.title.slice(0, 60)}`);
       console.log(`    SEO (from sheet): Page ${row.seoPage || 'N/A'} | Priority: ${row.priority || 'N/A'}`);
 
-      const substackContent = await generateSubstackPost(row);
+      let substackContent = await generateSubstackPost(row);
+      substackContent = ensureTargetUrl(substackContent, row.targetUrl);
       console.log(`    Posting to Substack (account: ${row.name})...`);
-      const postResult = await postToSubstackAccount(row.name, row.descriptionTitle || '', substackContent);
+      const postResult = await postToSubstackAccount(row.name, row.title || '', substackContent);
 
       if (postResult.success) {
         await saveSubstackBatchResult(row, {
@@ -1234,6 +2067,7 @@ export async function runSubstackBatch(batchNum: number = 1): Promise<void> {
           substackStatus: 'Posted',
           substackBatch: batchLabel,
         });
+        recordPost('substack');
         console.log(`    ✅ Posted → ${postResult.postUrl}`);
         posted++;
       } else {
@@ -1273,83 +2107,107 @@ export async function runSubstackBatch(batchNum: number = 1): Promise<void> {
   }
 }
 
-// ──── Guffiz Batch ──────────────────────────────────────────────────────────
-export async function runGuffizBatch(batchNum: number = 1): Promise<void> {
-  console.log(`\n[GUFFIZ BATCH] Starting...`);
-
-  const rows = await getRowsForContinuousGuffizPosting(15);
-
-  if (rows.length === 0) {
-    console.log('[GUFFIZ BATCH] No rows available');
-    return;
-  }
-
+// ──── WordPress Batch ───────────────────────────────────────────────────────
+export async function runWordpressBatch(batchNum: number = 1, rowsOverride?: SheetRow[]): Promise<void> {
+  console.log(`\n[WORDPRESS BATCH] Starting...`);
+  const progress = getBlogRowProgress();
+  console.log(`  [WordPress] Last posted row index: ${progress.wordpress}`);
+  const rows = rowsOverride ?? await getRowsForContinuousWordpressPosting(15, progress.wordpress);
+  if (rows.length === 0) { console.log('[WORDPRESS BATCH] No rows available'); return; }
   const batchLabel = `Batch ${batchNum}`;
-
-  console.log(`\n[GUFFIZ BATCH] Starting ${batchLabel}...`);
-  console.log(`  Found ${rows.length} rows ready for Guffiz posting`);
-  let posted = 0;
-  let failed = 0;
-
+  console.log(`  Found ${rows.length} rows ready for WordPress posting (${batchLabel})`);
+  let posted = 0, failed = 0;
   for (const row of rows) {
     try {
-      console.log(`\n  Processing: ${row.title.slice(0, 60)}`);
-      console.log(`    SEO (from sheet): Page ${row.seoPage || 'N/A'} | Priority: ${row.priority || 'N/A'}`);
-
-      const guffizContent = await generateGuffizPost(row);
-      console.log(`    Posting to Guffiz (account: ${row.name})...`);
-      const postResult = await postToGuffizAccount(row.name, row.descriptionTitle || '', guffizContent, row.description);
-
-      if (postResult.success) {
-        await saveGuffizBatchResult(row, {
-          guffizPostUrl: postResult.postUrl || '',
-          guffizStatus: 'Posted',
-          guffizBatch: batchLabel,
-        });
-        console.log(`    ✅ Posted → ${postResult.postUrl}`);
+      console.log(`\n  Processing [row ${row.rowIndex}]: ${row.title.slice(0, 60)}`);
+      let content = row.blogContent || await generateHackmdPost(row);
+      content = ensureTargetUrl(content, row.targetUrl);
+      const title = row.title;
+      const r = await postToWordpressAccount(row.name, title, content);
+      if (r.success) {
+        await saveSlotResult(row.rowIndex, 3, 'WordPress', { url: r.postUrl || '', status: 'Posted', batch: batchLabel });
+        recordPost('wordpress');
+        console.log(`    ✅ Posted → ${r.postUrl}`);
         posted++;
       } else {
-        await saveGuffizBatchResult(row, {
-          guffizPostUrl: '',
-          guffizStatus: 'Failed',
-          guffizBatch: row.guffizBatch || '',
-          guffizError: postResult.error,
-        });
-        console.log(`    ❌ Failed: ${postResult.error}`);
+        await saveSlotResult(row.rowIndex, 3, 'WordPress', { url: '', status: 'Failed', batch: batchLabel, error: r.error });
         failed++;
       }
-
-      await new Promise(r => setTimeout(r, 1000));
     } catch (err: any) {
-      const kbEntry = recordError({ rawError: err.message, platform: 'guffiz', stage: 'post', rowIndex: row.rowIndex, rowTitle: row.title, batchRun: batchNum });
-      await applyFix(kbEntry, { platform: 'guffiz', accountName: row.name, rowIndex: row.rowIndex });
-      console.error(`  ❌ Row ${row.rowIndex} [${kbEntry.classification}]: ${err.message}`);
-      try {
-        await saveGuffizBatchResult(row, {
-          guffizPostUrl: '',
-          guffizStatus: 'Error',
-          guffizBatch: row.guffizBatch || '',
-          guffizError: err.message,
-        });
-      } catch (saveErr: any) {
-        console.error(`  ⚠️ Row ${row.rowIndex} SHEET SAVE ALSO FAILED: ${saveErr.message}`);
-      }
+      console.error(`  ❌ Row ${row.rowIndex}: ${err.message}`);
+      try { await saveSlotResult(row.rowIndex, 3, 'WordPress', { url: '', status: 'Error', batch: batchLabel, error: err.message }); } catch {}
       failed++;
     }
+    // Always advance progress regardless of success/failure (skip when posting from Content Pool —
+    // pool rowIndex values are on a different sheet and would corrupt the Blogs-tab cursor)
+    if (!rowsOverride) {
+      try {
+        const prog = getBlogRowProgress();
+        if (row.rowIndex > (prog.wordpress || 0)) {
+          saveBlogRowProgress({ ...prog, wordpress: row.rowIndex });
+        }
+      } catch (progErr: any) {
+        console.error(`   ❌ Progress save error: ${progErr.message}`);
+      }
+    }
   }
+  console.log(`\n[WORDPRESS BATCH] ${batchLabel} complete: ${posted}/${rows.length} posted, ${failed} failed`);
+}
 
-  if (posted > 0) {
-    console.log(`\n[GUFFIZ BATCH] ${batchLabel} complete: ${posted}/${rows.length} posted, ${failed} failed`);
-  } else {
-    console.log(`\n[GUFFIZ BATCH] No successful posts in this run`);
+// ──── Blogger Batch ─────────────────────────────────────────────────────────
+export async function runBloggerBatch(batchNum: number = 1, rowsOverride?: SheetRow[]): Promise<void> {
+  console.log(`\n[BLOGGER BATCH] Starting...`);
+  const progress = getBlogRowProgress();
+  console.log(`  [Blogger] Last posted row index: ${progress.blogger}`);
+  const rows = rowsOverride ?? await getRowsForContinuousBloggerPosting(15, progress.blogger);
+  if (rows.length === 0) { console.log('[BLOGGER BATCH] No rows available'); return; }
+  const batchLabel = `Batch ${batchNum}`;
+  console.log(`  Found ${rows.length} rows ready for Blogger posting (${batchLabel})`);
+  let posted = 0, failed = 0;
+  for (const row of rows) {
+    try {
+      console.log(`\n  Processing [row ${row.rowIndex}]: ${row.title.slice(0, 60)}`);
+      let content = row.blogContent || await generateHackmdPost(row);
+      const title = row.title;
+      if (row.targetUrl && !content.includes(row.targetUrl)) {
+        content += `\n\n<p><a href="${row.targetUrl}">Read the full report on Ken Research</a></p>`;
+      }
+      const r = await postToBloggerAccount(row.name, title, content);
+      if (r.success) {
+        await saveSlotResult(row.rowIndex, 1, 'Blogger', { url: r.postUrl || '', status: 'Posted', batch: batchLabel });
+        recordPost('blogger');
+        console.log(`    ✅ Posted → ${r.postUrl}`);
+        posted++;
+      } else {
+        await saveSlotResult(row.rowIndex, 1, 'Blogger', { url: '', status: 'Failed', batch: batchLabel, error: r.error });
+        failed++;
+      }
+    } catch (err: any) {
+      console.error(`  ❌ Row ${row.rowIndex}: ${err.message}`);
+      try { await saveSlotResult(row.rowIndex, 1, 'Blogger', { url: '', status: 'Error', batch: batchLabel, error: err.message }); } catch {}
+      failed++;
+    }
+    // Always advance progress regardless of success/failure so we never re-pick same rows
+    // (skip when posting from Content Pool — pool rowIndex values are on a different sheet)
+    if (!rowsOverride) {
+      try {
+        const prog = getBlogRowProgress();
+        if (row.rowIndex > (prog.blogger || 0)) {
+          saveBlogRowProgress({ ...prog, blogger: row.rowIndex });
+        }
+      } catch (progErr: any) {
+        console.error(`   ❌ Progress save error: ${progErr.message}`);
+      }
+    }
   }
+  console.log(`\n[BLOGGER BATCH] ${batchLabel} complete: ${posted}/${rows.length} posted, ${failed} failed`);
 }
 
 // ──── HackMD Batch ──────────────────────────────────────────────────────────
-export async function runHackmdBatch(batchNum: number = 1): Promise<void> {
+export async function runHackmdBatch(batchNum: number = 1, rowsOverride?: SheetRow[]): Promise<void> {
   console.log(`\n[HACKMD BATCH] Starting...`);
 
-  const rows = await getRowsForContinuousHackmdPosting(15);
+  const rows = rowsOverride ?? await getRowsForContinuousHackmdPosting(15);
 
   if (rows.length === 0) {
     console.log('[HACKMD BATCH] No rows available');
@@ -1357,6 +2215,7 @@ export async function runHackmdBatch(batchNum: number = 1): Promise<void> {
   }
 
   const batchLabel = `Batch ${batchNum}`;
+  const BATCH_DEADLINE = Date.now() + 5 * 60 * 1000; // 5-minute hard limit (API-only, fast)
 
   console.log(`\n[HACKMD BATCH] Starting ${batchLabel}...`);
   console.log(`  Found ${rows.length} rows ready for HackMD posting`);
@@ -1364,28 +2223,34 @@ export async function runHackmdBatch(batchNum: number = 1): Promise<void> {
   let failed = 0;
 
   for (const row of rows) {
+    if (Date.now() > BATCH_DEADLINE) {
+      console.warn(`\n[HACKMD BATCH] 5-minute deadline reached — stopping early (${posted} posted so far)`);
+      break;
+    }
     try {
       console.log(`\n  Processing: ${row.title.slice(0, 60)}`);
       console.log(`    SEO (from sheet): Page ${row.seoPage || 'N/A'} | Priority: ${row.priority || 'N/A'}`);
 
-      const hackmdContent = await generateHackmdPost(row);
+      let hackmdContent = await generateHackmdPost(row);
+      hackmdContent = ensureTargetUrl(hackmdContent, row.targetUrl);
       console.log(`    Posting to HackMD (account: ${row.name})...`);
-      const postResult = await postToHackmdAccount(row.descriptionTitle || row.title || '', hackmdContent, row.name, row.description || '');
+      const postResult = await postToHackmdAccount(row.title || '', hackmdContent, row.name, row.description || '');
 
       if (postResult.success) {
-        await saveHackmdBatchResult(row, {
-          hackmdPostUrl: postResult.postUrl || '',
-          hackmdStatus: 'Posted',
-          hackmdBatch: batchLabel,
+        await saveSlotResult(row.rowIndex, 3, 'HackMD', {
+          url: postResult.postUrl || '',
+          status: 'Posted',
+          batch: batchLabel,
         });
+        recordPost('hackmd');
         console.log(`    ✅ Posted → ${postResult.postUrl}`);
         posted++;
       } else {
-        await saveHackmdBatchResult(row, {
-          hackmdPostUrl: '',
-          hackmdStatus: 'Failed',
-          hackmdBatch: row.hackmdBatch || '',
-          hackmdError: postResult.error,
+        await saveSlotResult(row.rowIndex, 3, 'HackMD', {
+          url: '',
+          status: 'Failed',
+          batch: batchLabel,
+          error: postResult.error,
         });
         console.log(`    ❌ Failed: ${postResult.error}`);
         failed++;
@@ -1397,11 +2262,11 @@ export async function runHackmdBatch(batchNum: number = 1): Promise<void> {
       await applyFix(kbEntry, { platform: 'hackmd', accountName: row.name, rowIndex: row.rowIndex });
       console.error(`  ❌ Row ${row.rowIndex} [${kbEntry.classification}]: ${err.message}`);
       try {
-        await saveHackmdBatchResult(row, {
-          hackmdPostUrl: '',
-          hackmdStatus: 'Error',
-          hackmdBatch: row.hackmdBatch || '',
-          hackmdError: err.message,
+        await saveSlotResult(row.rowIndex, 3, 'HackMD', {
+          url: '',
+          status: 'Error',
+          batch: batchLabel,
+          error: err.message,
         });
       } catch (saveErr: any) {
         console.error(`  ⚠️ Row ${row.rowIndex} SHEET SAVE ALSO FAILED: ${saveErr.message}`);
@@ -1467,75 +2332,67 @@ async function postToSubstackAccount(
   }
 }
 
-// Helper: Post to Guffiz account
-async function postToGuffizAccount(
-  accountName: string,
+// Helper: Post to HackMD via API only (no browser — fast, fits 5-min batch budget)
+async function postToHackmdAccount(
   title: string,
   htmlContent: string,
-  description?: string
+  accountName?: string,
+  _description?: string
 ): Promise<{ success: boolean; postUrl?: string; error?: string }> {
   try {
-    const postResult = await executeBrowserTool('post_guffiz', {
-      nickname: accountName,
-      title,
-      htmlContent,
-      description,
-    });
-    return {
-      success: postResult.success ?? false,
-      postUrl: postResult.postUrl,
-      error: postResult.error,
-    };
+    const apiKey = getHackMDApiKey(accountName);
+    if (!apiKey) {
+      return { success: false, error: `No HackMD API key for account: ${accountName || 'unknown'}` };
+    }
+    return await postToHackMDApi(apiKey, title, htmlContent);
   } catch (err: any) {
     return { success: false, error: err.message };
   }
 }
 
-// Helper: Post to HackMD (no account needed)
-async function postToHackmdAccount(
-  title: string,
-  htmlContent: string,
-  accountName?: string,
-  description?: string
-): Promise<{ success: boolean; postUrl?: string; error?: string }> {
+function getHackMDApiKey(nickname?: string): string | null {
+  if (!nickname) return null;
   try {
-    // Login to HackMD first
-    if (accountName) {
-      const loginResult = await executeBrowserTool('login_hackmd', { nickname: accountName });
-      if (!loginResult.success) {
-        return { success: false, error: loginResult.error || 'HackMD login failed' };
-      }
-    }
-
-    const postResult = await executeBrowserTool('post_hackmd', {
-      title,
-      htmlContent,
-      description,
-    });
-    return {
-      success: postResult.success ?? false,
-      postUrl: postResult.postUrl,
-      error: postResult.error,
-    };
-  } catch (err: any) {
-    return { success: false, error: err.message };
+    const accounts = getHackMDAccounts();
+    const account = accounts.find(
+      a => a.nickname?.toLowerCase() === nickname.toLowerCase()
+        || a.username?.toLowerCase() === nickname.toLowerCase()
+        || a.email?.toLowerCase() === nickname.toLowerCase(),
+    );
+    return (account as any)?.apiKey || null;
+  } catch {
+    return null;
   }
 }
 
 // ── Save helpers with batch column ──────────────────────────────────────────────
 
-import { saveUnifiedFbResult, saveUnifiedLinkedInResult } from '../sheets/sheets.js';
-
+// Facebook, Tumblr, LinkedIn now share the Social Media tab's slot columns
+// (see saveSocialSlotResult) instead of their own dedicated Fb/Tumblr/LI
+// columns — Facebook+Tumblr+Pearltrees share slot 2, LinkedIn+X+Instapaper+
+// Raindrop share slot 1. Only url/status/error/batch are tracked per slot
+// (no post-body-text column), matching the New Logic slot pattern.
 async function saveFbBatchResult(
   row: SheetRow,
   data: { fbPost: string; fbPostUrl: string; fbStatus: string; fbBatch: string; fbError?: string }
 ): Promise<void> {
-  await saveUnifiedFbResult(row, {
-    post: data.fbPost,
-    postUrl: data.fbPostUrl,
+  await saveSocialSlotResult(row.rowIndex, 2, 'Facebook', {
+    url: data.fbPostUrl,
     status: data.fbStatus,
     error: data.fbError || '',
     batch: data.fbBatch,
+  });
+}
+
+async function saveTumblrBatchResult(
+  row: SheetRow,
+  data: { tumblrPost: string; tumblrPostUrl: string; tumblrStatus: string; tumblrBatch: string; tumblrError?: string }
+): Promise<void> {
+  await saveSocialSlotResult(row.rowIndex, 2, 'Tumblr', {
+    url: data.tumblrPostUrl,
+    status: data.tumblrStatus,
+    error: data.tumblrError || '',
+    batch: data.tumblrBatch,
   });
 }
 
@@ -1543,22 +2400,21 @@ async function saveLiBatchResult(
   row: SheetRow,
   data: { liPost: string; liPostUrl: string; liStatus: string; liBatch: string; liError?: string }
 ): Promise<void> {
-  await saveUnifiedLinkedInResult(row, {
-    post: data.liPost,
-    postUrl: data.liPostUrl,
+  await saveSocialSlotResult(row.rowIndex, 1, 'LinkedIn', {
+    url: data.liPostUrl,
     status: data.liStatus,
     error: data.liError || '',
     batch: data.liBatch,
   });
 }
 
+// Medium now shares slot 1 on the New Logic tab (see getRowsForContinuousMediumPosting).
 async function saveMediumBatchResult(
   row: SheetRow,
   data: { mediumPost: string; mediumPostUrl: string; mediumStatus: string; mediumBatch: string; mediumError?: string }
 ): Promise<void> {
-  await saveUnifiedMediumResult(row, {
-    post: data.mediumPost,
-    postUrl: data.mediumPostUrl,
+  await saveSlotResult(row.rowIndex, 1, 'Medium', {
+    url: data.mediumPostUrl,
     status: data.mediumStatus,
     error: data.mediumError || '',
     batch: data.mediumBatch,
@@ -1580,13 +2436,13 @@ async function saveLinkmateBatchResult(
   });
 }
 
+// Google Sites now shares slot 2 on the New Logic tab (see getRowsForContinuousGoogleSitePosting).
 async function saveGoogleSiteBatchResult(
   row: SheetRow,
   data: { googleSitePost: string; googleSitePostUrl: string; googleSiteStatus: string; googleSiteBatch: string; googleSiteError?: string }
 ): Promise<void> {
-  await saveUnifiedGoogleSiteResult(row, {
-    post: data.googleSitePost,
-    postUrl: data.googleSitePostUrl,
+  await saveSlotResult(row.rowIndex, 2, 'Google Sites', {
+    url: data.googleSitePostUrl,
     status: data.googleSiteStatus,
     error: data.googleSiteError || '',
     batch: data.googleSiteBatch,
@@ -1641,18 +2497,6 @@ async function saveSubstackBatchResult(
   });
 }
 
-async function saveGuffizBatchResult(
-  row: SheetRow,
-  data: { guffizPostUrl: string; guffizStatus: string; guffizBatch: string; guffizError?: string }
-): Promise<void> {
-  await saveUnifiedGuffizResult(row, {
-    postUrl: data.guffizPostUrl,
-    status: data.guffizStatus,
-    error: data.guffizError || '',
-    batch: data.guffizBatch,
-  });
-}
-
 async function saveHackmdBatchResult(
   row: SheetRow,
   data: { hackmdPostUrl: string; hackmdStatus: string; hackmdBatch: string; hackmdError?: string }
@@ -1665,91 +2509,6 @@ async function saveHackmdBatchResult(
   });
 }
 
-async function postToPenzuAccount(
-  accountName: string,
-  title: string,
-  htmlContent: string,
-): Promise<{ success: boolean; postUrl?: string; error?: string }> {
-  try {
-    const loginResult = await executeBrowserTool('login_penzu', { nickname: accountName });
-    if (!loginResult.success) {
-      return { success: false, error: loginResult.error || 'Penzu login failed' };
-    }
-    const postResult = await executeBrowserTool('post_penzu', { title, htmlContent });
-    return { success: postResult.success ?? false, postUrl: postResult.postUrl, error: postResult.error };
-  } catch (err: any) {
-    return { success: false, error: err.message };
-  }
-}
-
-async function savePenzuBatchResult(
-  row: SheetRow,
-  data: { penzuPostUrl: string; penzuStatus: string; penzuBatch: string; penzuError?: string }
-): Promise<void> {
-  await saveUnifiedPenzuResult(row, {
-    postUrl: data.penzuPostUrl,
-    status: data.penzuStatus,
-    error: data.penzuError || '',
-    batch: data.penzuBatch,
-  });
-}
-
-async function postToWriteupCafeAccount(
-  accountName: string,
-  title: string,
-  htmlContent: string,
-  description?: string,
-  seedKeyword?: string,
-): Promise<{ success: boolean; postUrl?: string; error?: string }> {
-  try {
-    const loginResult = await executeBrowserTool('login_writeupcafe', { nickname: accountName });
-    if (!loginResult.success) {
-      return { success: false, error: loginResult.error || 'WriteupCafe login failed' };
-    }
-    const postResult = await executeBrowserTool('post_writeupcafe', { title, htmlContent, description, seedKeyword });
-    return { success: postResult.success ?? false, postUrl: postResult.postUrl, error: postResult.error };
-  } catch (err: any) {
-    return { success: false, error: err.message };
-  }
-}
-
-async function saveWriteupCafeBatchResult(
-  row: SheetRow,
-  data: { writeupcafePostUrl: string; writeupcafeStatus: string; writeupcafeBatch: string; writeupcafeError?: string }
-): Promise<void> {
-  await saveUnifiedWriteupCafeResult(row, {
-    postUrl: data.writeupcafePostUrl,
-    status: data.writeupcafeStatus,
-    error: data.writeupcafeError || '',
-    batch: data.writeupcafeBatch,
-  });
-}
-
-export async function runWriteupCafeBatch(): Promise<void> {
-  const counters = getCounters();
-  counters.writeupcafe = (counters.writeupcafe || 0) + 1;
-  saveCounters(counters);
-  const label = `Batch ${counters.writeupcafe}`;
-
-  console.log(`\n📝 [WriteupCafe] ${label} — fetching rows...`);
-  const rows = await getRowsReadyForWriteupCafe(15);
-  if (rows.length === 0) {
-    console.log(`   ℹ️  No rows ready for WriteupCafe — skipping`);
-    return;
-  }
-
-  for (const row of rows) {
-    const title = row.title || row.descriptionTitle || '';
-    const content = row.blogContent || '';
-    if (!content) {
-      await saveWriteupCafeBatchResult(row, { writeupcafePostUrl: '', writeupcafeStatus: 'Failed', writeupcafeBatch: label, writeupcafeError: 'No blog content' });
-      continue;
-    }
-    const r = await postToWriteupCafeAccount(row.name, title, content, row.description, row.seedKeyword);
-    await saveWriteupCafeBatchResult(row, { writeupcafePostUrl: r.postUrl || '', writeupcafeStatus: r.success ? 'Posted' : 'Failed', writeupcafeBatch: label, writeupcafeError: r.error });
-    console.log(r.success ? `✅ Posted → ${r.postUrl}` : `❌ Failed: ${r.error}`);
-  }
-}
 
 async function postToBloggerAccount(
   accountName: string,
@@ -1809,14 +2568,337 @@ async function saveWordpressBatchResult(
   });
 }
 
+// ──── Patreon Batch ───────────────────────────────────────────────────────────
+
+export async function runPatreonBatch(batchNum: number = 1): Promise<void> {
+  console.log(`\n[PATREON BATCH] Starting...`);
+  const rows = await getRowsForContinuousPatreonPosting(15);
+  if (rows.length === 0) { console.log('[PATREON BATCH] No rows available'); return; }
+  const batchLabel = `Batch ${batchNum}`;
+  console.log(`  Found ${rows.length} rows ready for Patreon (${batchLabel})`);
+  let posted = 0, failed = 0;
+  for (const row of rows) {
+    try {
+      console.log(`\n  Processing: ${row.title.slice(0, 60)}`);
+      let content = row.blogContent || '';
+      const title = row.title;
+      if (!content) {
+        await saveUnifiedPatreonResult(row, { postUrl: '', status: 'Failed', batch: batchLabel, error: 'No blog content' });
+        failed++;
+        continue;
+      }
+      content = ensureTargetUrl(content, row.targetUrl);
+      const loginResult = await executeBrowserTool('login_patreon', { nickname: row.name });
+      if (!loginResult.success) throw new Error(loginResult.error || 'Login failed');
+      const postResult = await executeBrowserTool('post_patreon', { title, htmlContent: content });
+      if (postResult.success) {
+        await saveUnifiedPatreonResult(row, { postUrl: postResult.postUrl || '', status: 'Posted', batch: batchLabel });
+        recordPost('patreon');
+        console.log(`    ✅ Posted → ${postResult.postUrl}`);
+        posted++;
+      } else {
+        await saveUnifiedPatreonResult(row, { postUrl: '', status: 'Failed', batch: batchLabel, error: postResult.error });
+        failed++;
+      }
+    } catch (err: any) {
+      console.error(`  ❌ Row ${row.rowIndex}: ${err.message}`);
+      try { await saveUnifiedPatreonResult(row, { postUrl: '', status: 'Error', batch: batchLabel, error: err.message }); } catch {}
+      failed++;
+    }
+    await new Promise(r => setTimeout(r, 1000));
+  }
+  console.log(`\n[PATREON BATCH] ${batchLabel} complete: ${posted}/${rows.length} posted, ${failed} failed`);
+}
+
+// ──── Notion Batch ─────────────────────────────────────────────────────────────
+
+export async function runNotionBatch(batchNum: number = 1, rowsOverride?: SheetRow[]): Promise<void> {
+  console.log(`\n[NOTION BATCH] Starting...`);
+  const rows = rowsOverride ?? await getRowsForContinuousNotionPosting(15);
+  if (rows.length === 0) { console.log('[NOTION BATCH] No rows available'); return; }
+  const batchLabel = `Batch ${batchNum}`;
+  console.log(`  Found ${rows.length} rows ready for Notion (${batchLabel})`);
+  let posted = 0, failed = 0;
+  for (const row of rows) {
+    try {
+      console.log(`\n  Processing: ${row.title.slice(0, 60)}`);
+      let content = row.blogContent || '';
+      const title = row.title || row.descriptionTitle || '';
+      if (!content) {
+        await saveSlotResult(row.rowIndex, 2, 'Notion', { url: '', status: 'Failed', batch: batchLabel, error: 'No blog content' });
+        failed++;
+        continue;
+      }
+      content = ensureTargetUrl(content, row.targetUrl);
+      const loginResult = await executeBrowserTool('login_notion', { nickname: row.name });
+      if (!loginResult.success) throw new Error(loginResult.error || 'Login failed');
+      const postResult = await executeBrowserTool('post_notion', { title, htmlContent: content });
+      if (postResult.success) {
+        await saveSlotResult(row.rowIndex, 2, 'Notion', { url: postResult.postUrl || '', status: 'Posted', batch: batchLabel });
+        recordPost('notion');
+        console.log(`    ✅ Posted → ${postResult.postUrl}`);
+        posted++;
+      } else {
+        await saveSlotResult(row.rowIndex, 2, 'Notion', { url: '', status: 'Failed', batch: batchLabel, error: postResult.error });
+        failed++;
+      }
+    } catch (err: any) {
+      console.error(`  ❌ Row ${row.rowIndex}: ${err.message}`);
+      try { await saveSlotResult(row.rowIndex, 2, 'Notion', { url: '', status: 'Error', batch: batchLabel, error: err.message }); } catch {}
+      failed++;
+    }
+    await new Promise(r => setTimeout(r, 1000));
+  }
+  console.log(`\n[NOTION BATCH] ${batchLabel} complete: ${posted}/${rows.length} posted, ${failed} failed`);
+}
+
+// ──── Note Batch ───────────────────────────────────────────────────────────────
+
+export async function runNoteBatch(batchNum: number = 1): Promise<void> {
+  console.log(`\n[NOTE BATCH] Starting...`);
+  const rows = await getRowsForContinuousNotePosting(15);
+  if (rows.length === 0) { console.log('[NOTE BATCH] No rows available'); return; }
+  const batchLabel = `Batch ${batchNum}`;
+  console.log(`  Found ${rows.length} rows ready for Note (${batchLabel})`);
+  let posted = 0, failed = 0;
+  for (const row of rows) {
+    try {
+      console.log(`\n  Processing: ${row.title.slice(0, 60)}`);
+      let content = row.blogContent || '';
+      const title = row.title || row.descriptionTitle || '';
+      if (!content) {
+        await saveUnifiedNoteResult(row, { postUrl: '', status: 'Failed', batch: batchLabel, error: 'No blog content' });
+        failed++;
+        continue;
+      }
+      content = ensureTargetUrl(content, row.targetUrl);
+      const loginResult = await executeBrowserTool('login_note', { nickname: row.name });
+      if (!loginResult.success) throw new Error(loginResult.error || 'Login failed');
+      const postResult = await executeBrowserTool('post_note', { title, htmlContent: content });
+      if (postResult.success) {
+        await saveUnifiedNoteResult(row, { postUrl: postResult.postUrl || '', status: 'Posted', batch: batchLabel });
+        recordPost('note');
+        console.log(`    ✅ Posted → ${postResult.postUrl}`);
+        posted++;
+      } else {
+        await saveUnifiedNoteResult(row, { postUrl: '', status: 'Failed', batch: batchLabel, error: postResult.error });
+        failed++;
+      }
+    } catch (err: any) {
+      console.error(`  ❌ Row ${row.rowIndex}: ${err.message}`);
+      try { await saveUnifiedNoteResult(row, { postUrl: '', status: 'Error', batch: batchLabel, error: err.message }); } catch {}
+      failed++;
+    }
+    await new Promise(r => setTimeout(r, 1000));
+  }
+  console.log(`\n[NOTE BATCH] ${batchLabel} complete: ${posted}/${rows.length} posted, ${failed} failed`);
+}
+
+// ──── Naver Batch ──────────────────────────────────────────────────────────────
+
+export async function runNaverBatch(batchNum: number = 1, rowsOverride?: SheetRow[]): Promise<void> {
+  console.log(`\n[NAVER BATCH] Starting...`);
+  const rows = rowsOverride ?? await getRowsForContinuousNaverPosting(15);
+  if (rows.length === 0) { console.log('[NAVER BATCH] No rows available'); return; }
+  const batchLabel = `Batch ${batchNum}`;
+  console.log(`  Found ${rows.length} rows ready for Naver (${batchLabel})`);
+  let posted = 0, failed = 0;
+  for (const row of rows) {
+    try {
+      console.log(`\n  Processing: ${row.title.slice(0, 60)}`);
+      let content = row.blogContent || '';
+      const title = row.title || row.descriptionTitle || '';
+      if (!content) {
+        await saveUnifiedNaverResult(row, { postUrl: '', status: 'Failed', batch: batchLabel, error: 'No blog content' });
+        failed++;
+        continue;
+      }
+      content = ensureTargetUrl(content, row.targetUrl);
+      const loginResult = await executeBrowserTool('login_naver', { nickname: row.name });
+      if (!loginResult.success) throw new Error(loginResult.error || 'Login failed');
+      const postResult = await executeBrowserTool('post_naver', { title, htmlContent: content });
+      if (postResult.success) {
+        await saveUnifiedNaverResult(row, { postUrl: postResult.postUrl || '', status: 'Posted', batch: batchLabel });
+        recordPost('naver');
+        console.log(`    ✅ Posted → ${postResult.postUrl}`);
+        posted++;
+      } else {
+        await saveUnifiedNaverResult(row, { postUrl: '', status: 'Failed', batch: batchLabel, error: postResult.error });
+        failed++;
+      }
+    } catch (err: any) {
+      console.error(`  ❌ Row ${row.rowIndex}: ${err.message}`);
+      try { await saveUnifiedNaverResult(row, { postUrl: '', status: 'Error', batch: batchLabel, error: err.message }); } catch {}
+      failed++;
+    }
+    await new Promise(r => setTimeout(r, 1000));
+  }
+  console.log(`\n[NAVER BATCH] ${batchLabel} complete: ${posted}/${rows.length} posted, ${failed} failed`);
+}
+
+// ──── Velog Batch ──────────────────────────────────────────────────────────────
+
+export async function runVelogBatch(batchNum: number = 1): Promise<void> {
+  console.log(`\n[VELOG BATCH] Starting...`);
+  const rows = await getRowsForContinuousVelogPosting(15);
+  if (rows.length === 0) { console.log('[VELOG BATCH] No rows available'); return; }
+  const batchLabel = `Batch ${batchNum}`;
+  console.log(`  Found ${rows.length} rows ready for Velog (${batchLabel})`);
+  let posted = 0, failed = 0;
+  for (const row of rows) {
+    try {
+      console.log(`\n  Processing: ${row.title.slice(0, 60)}`);
+      let content = row.blogContent || '';
+      const title = row.title || row.descriptionTitle || '';
+      if (!content) {
+        await saveSlotResult(row.rowIndex, 1, 'Velog', { url: '', status: 'Failed', batch: batchLabel, error: 'No blog content' });
+        failed++;
+        continue;
+      }
+      content = ensureTargetUrl(content, row.targetUrl);
+      const loginResult = await executeBrowserTool('login_velog', { nickname: row.name });
+      if (!loginResult.success) throw new Error(loginResult.error || 'Login failed');
+      const postResult = await executeBrowserTool('post_velog', { title, htmlContent: content });
+      if (postResult.success) {
+        await saveSlotResult(row.rowIndex, 1, 'Velog', { url: postResult.postUrl || '', status: 'Posted', batch: batchLabel });
+        recordPost('velog');
+        console.log(`    ✅ Posted → ${postResult.postUrl}`);
+        posted++;
+      } else {
+        await saveSlotResult(row.rowIndex, 1, 'Velog', { url: '', status: 'Failed', batch: batchLabel, error: postResult.error });
+        failed++;
+      }
+    } catch (err: any) {
+      console.error(`  ❌ Row ${row.rowIndex}: ${err.message}`);
+      try { await saveSlotResult(row.rowIndex, 1, 'Velog', { url: '', status: 'Error', batch: batchLabel, error: err.message }); } catch {}
+      failed++;
+    }
+    await new Promise(r => setTimeout(r, 1000));
+  }
+  console.log(`\n[VELOG BATCH] ${batchLabel} complete: ${posted}/${rows.length} posted, ${failed} failed`);
+}
+
+// ──── Coda Batch ───────────────────────────────────────────────────────────────
+
+export async function runCodaBatch(batchNum: number = 1, rowsOverride?: SheetRow[]): Promise<void> {
+  console.log(`\n[CODA BATCH] Starting...`);
+  const rows = rowsOverride ?? await getRowsForContinuousCodaPosting(15);
+  if (rows.length === 0) { console.log('[CODA BATCH] No rows available'); return; }
+  const batchLabel = `Batch ${batchNum}`;
+  console.log(`  Found ${rows.length} rows ready for Coda (${batchLabel})`);
+  let posted = 0, failed = 0;
+  for (const row of rows) {
+    try {
+      console.log(`\n  Processing: ${row.title.slice(0, 60)}`);
+      let content = row.blogContent || '';
+      const title = row.title || row.descriptionTitle || '';
+      if (!content) {
+        await saveSlotResult(row.rowIndex, 1, 'Coda', { url: '', status: 'Failed', batch: batchLabel, error: 'No blog content' });
+        failed++;
+        continue;
+      }
+      content = ensureTargetUrl(content, row.targetUrl);
+      const loginResult = await executeBrowserTool('login_coda', { nickname: row.name });
+      if (!loginResult.success) throw new Error(loginResult.error || 'Login failed');
+      const postResult = await executeBrowserTool('post_coda', { title, htmlContent: content });
+      if (postResult.success) {
+        await saveSlotResult(row.rowIndex, 1, 'Coda', { url: postResult.postUrl || '', status: 'Posted', batch: batchLabel });
+        recordPost('coda');
+        console.log(`    ✅ Posted → ${postResult.postUrl}`);
+        posted++;
+      } else {
+        await saveSlotResult(row.rowIndex, 1, 'Coda', { url: '', status: 'Failed', batch: batchLabel, error: postResult.error });
+        failed++;
+      }
+    } catch (err: any) {
+      console.error(`  ❌ Row ${row.rowIndex}: ${err.message}`);
+      try { await saveSlotResult(row.rowIndex, 1, 'Coda', { url: '', status: 'Error', batch: batchLabel, error: err.message }); } catch {}
+      failed++;
+    }
+    await new Promise(r => setTimeout(r, 1000));
+  }
+  console.log(`\n[CODA BATCH] ${batchLabel} complete: ${posted}/${rows.length} posted, ${failed} failed`);
+}
+
+// ── Ameba Batch ───────────────────────────────────────────────────────────────
+
+export async function runAmebaBatch(batchNum: number = 1): Promise<void> {
+  const { getRowsForContinuousAmebaPosting, saveUnifiedAmebaResult } = await import('../sheets/sheets.js');
+  const { loginToAmeba, closeAmebaBrowser } = await import('../browser/ameba/login.js');
+  const { postToAmeba } = await import('../browser/ameba/poster.js');
+
+  const rows = await getRowsForContinuousAmebaPosting(15);
+  if (rows.length === 0) { console.log('[AMEBA BATCH] No rows available'); return; }
+
+  const batchLabel = `Batch ${batchNum}`;
+  console.log(`\n[AMEBA BATCH] Starting ${batchLabel}...`);
+  console.log(`  Found ${rows.length} rows ready for Ameba posting`);
+  let posted = 0, failed = 0;
+
+  for (const row of rows) {
+    try {
+      console.log(`\n  Processing: ${row.title.slice(0, 60)}`);
+      let content = row.blogContent || await generateHackmdPost(row);
+      content = ensureTargetUrl(content, row.targetUrl);
+      const title = row.title || row.descriptionTitle || '';
+
+      let r: { success: boolean; postUrl: string; postedAt: Date } | null = null;
+      try {
+        const page = await withTimeout(
+          loginToAmeba({ nickname: row.name }),
+          2 * 60 * 1000, `Ameba login:${row.name}`
+        );
+        r = await withTimeout(
+          postToAmeba(page, title, content),
+          2 * 60 * 1000, `Ameba post:${row.name}`
+        );
+      } finally {
+        await closeAmebaBrowser();
+      }
+
+      if (r?.success) {
+        await saveUnifiedAmebaResult(row, { postUrl: r.postUrl || '', status: 'Posted', batch: batchLabel });
+        recordPost('ameba');
+        console.log(`    ✅ Posted → ${r.postUrl}`);
+        posted++;
+      } else {
+        await saveUnifiedAmebaResult(row, { postUrl: '', status: 'Failed', batch: batchLabel });
+        failed++;
+      }
+    } catch (err: any) {
+      console.error(`  ❌ Row ${row.rowIndex}: ${err.message}`);
+      try { await saveUnifiedAmebaResult(row, { postUrl: '', status: 'Error', batch: batchLabel, error: err.message }); } catch {}
+      failed++;
+    }
+    await new Promise(r => setTimeout(r, 1000));
+  }
+  console.log(`\n[AMEBA BATCH] ${batchLabel} complete: ${posted}/${rows.length} posted, ${failed} failed`);
+}
+
 // ── Retry single row on a specific platform ───────────────────────────────────
 
-const BLOG_PLATFORMS  = ['googlesite', 'hackmd', 'devto', 'medium', 'linkmate', 'linkedin-pulse', 'calisthenics', 'substack', 'guffiz', 'wordpress', 'blogger', 'penzu', 'writeupcafe'];
+const BLOG_PLATFORMS  = ['googlesite', 'hackmd', 'devto', 'medium', 'linkmate', 'linkedin-pulse', 'calisthenics', 'substack', 'wordpress', 'blogger', 'patreon', 'notion', 'note', 'naver', 'velog', 'coda'];
 const SOCIAL_PLATFORMS = ['x', 'facebook', 'linkedin'];
+
+// Verified against each platform's real getRowsForContinuousXPosting() in
+// sheets.ts — most New Logic 3-slot platforms (getRowsNeedingSlot) live on
+// the 'newLogic' sheet, not 'blog' as a naive default would assume. Only
+// Substack/Naver/Paragraph genuinely read the 'blog' sheet; X/Facebook/
+// LinkedIn read 'social'. Getting this wrong silently fails column lookups
+// rather than erroring clearly, so keep this map in sync with sheets.ts
+// whenever a platform's picker function changes sheets.
+const RETRY_ROW_SHEET_TYPE: Record<string, 'social' | 'blog' | 'newLogic'> = {
+  x: 'social', facebook: 'social', linkedin: 'social',
+  googlesite: 'newLogic', medium: 'newLogic', linkmate: 'newLogic', devto: 'newLogic',
+  'linkedin-pulse': 'newLogic', calisthenics: 'newLogic', wordpress: 'newLogic',
+  blogger: 'newLogic', hackmd: 'newLogic', notion: 'newLogic', velog: 'newLogic',
+  coda: 'newLogic',
+  substack: 'blog', naver: 'blog', paragraph: 'blog',
+};
 
 export async function runRetryRow(rowIndex: number, platform: string): Promise<void> {
   const p = platform.toLowerCase().replace(/_/g, '-');
-  const sheetType = SOCIAL_PLATFORMS.includes(p) ? 'social' : 'blog';
+  const sheetType = RETRY_ROW_SHEET_TYPE[p] ?? 'blog';
 
   console.log(`\n🔄 Retry row ${rowIndex} on ${p} (${sheetType} sheet)`);
 
@@ -1827,44 +2909,53 @@ export async function runRetryRow(rowIndex: number, platform: string): Promise<v
   }
 
   console.log(`   Title   : ${row.title?.slice(0, 70)}`);
-  console.log(`   Account : ${row.name}`);
+  console.log(`   Account : ${(p === 'medium' || p === 'googlesite') ? row.newName : row.name}`);
 
   const label = 'Retry';
 
-  const title = row.descriptionTitle || row.title || '';
+  const title = row.title || '';
 
   try {
     switch (p) {
       case 'googlesite': {
-        const content = await generateGoogleSitePost(row);
-        const r = await postToGoogleSiteAccount(row.name, title, content, row.seedKeyword);
+        let content = await generateGoogleSitePost(row);
+        content = ensureTargetUrl(content, row.targetUrl);
+        const gsNick = (row.newName || '').trim();
+        if (!gsNick) throw new Error(`Row ${row.rowIndex}: "New Name" column empty — cannot post to Google Sites`);
+        const r = await postToGoogleSiteAccount(gsNick, title, content, row.seedKeyword);
         await saveGoogleSiteBatchResult(row, { googleSitePost: content, googleSitePostUrl: r.postUrl || '', googleSiteStatus: r.success ? 'Posted' : 'Failed', googleSiteBatch: label, googleSiteError: r.error });
         console.log(r.success ? `✅ Posted → ${r.postUrl}` : `❌ Failed: ${r.error}`);
         break;
       }
       case 'hackmd': {
-        const content = await generateHackmdPost(row);
+        let content = await generateHackmdPost(row);
+        content = ensureTargetUrl(content, row.targetUrl);
         const r = await postToHackmdAccount(title, content, row.name, row.description || '');
         await saveHackmdBatchResult(row, { hackmdPostUrl: r.postUrl || '', hackmdStatus: r.success ? 'Posted' : 'Failed', hackmdBatch: label, hackmdError: r.error });
         console.log(r.success ? `✅ Posted → ${r.postUrl}` : `❌ Failed: ${r.error}`);
         break;
       }
       case 'devto': {
-        const content = await generateDevtoPost(row);
+        let content = await generateDevtoPost(row);
+        content = ensureTargetUrl(content, row.targetUrl);
         const r = await postToDevtoAccount(row.name, title, content);
         await saveDevtoBatchResult(row, { devtoPostUrl: r.postUrl || '', devtoStatus: r.success ? 'Posted' : 'Failed', devtoBatch: label, devtoError: r.error });
         console.log(r.success ? `✅ Posted → ${r.postUrl}` : `❌ Failed: ${r.error}`);
         break;
       }
       case 'medium': {
-        const content = await generateMediumPost(row);
-        const r = await postToMediumAccount(row.name, title, content);
+        const mediumNick = (row.newName || '').trim();
+        if (!mediumNick) throw new Error(`Row ${row.rowIndex}: "New Name" column empty — cannot post to Medium`);
+        let content = await generateMediumPost(row);
+        content = ensureTargetUrl(content, row.targetUrl);
+        const r = await postToMediumAccount(mediumNick, title, content);
         await saveMediumBatchResult(row, { mediumPost: content, mediumPostUrl: r.postUrl || '', mediumStatus: r.success ? 'Posted' : 'Failed', mediumBatch: label, mediumError: r.error });
         console.log(r.success ? `✅ Posted → ${r.postUrl}` : `❌ Failed: ${r.error}`);
         break;
       }
       case 'linkmate': {
-        const content = await generateLinkmatePost(row);
+        let content = await generateLinkmatePost(row);
+        content = ensureTargetUrl(content, row.targetUrl);
         const r = await postToLinkmateAccount(row.name, title, content, row.seedKeyword);
         await saveLinkmateBatchResult(row, { linkMateContent: content, linkMatePostUrl: r.postUrl || '', linkMateStatus: r.success ? 'Posted' : 'Failed', linkmateBatch: label, linkMateError: r.error });
         console.log(r.success ? `✅ Posted → ${r.postUrl}` : `❌ Failed: ${r.error}`);
@@ -1872,50 +2963,35 @@ export async function runRetryRow(rowIndex: number, platform: string): Promise<v
       }
       case 'linkedin-pulse': {
         const pulseContent = await generateLinkedinPulsePost(row);
-        const r = await postToPulseAccount(row.name, pulseContent.title, pulseContent.html, pulseContent.seoTitle, pulseContent.seoDescription);
+        pulseContent.html = ensureTargetUrl(pulseContent.html, row.targetUrl);
+        const retryPulseTitle = (row.title || '').trim() || pulseContent.title;
+        const retryPulseCaption = (row.blogCaption || '').trim() || pulseContent.seoDescription;
+        const r = await postToPulseAccount(row.name, retryPulseTitle, pulseContent.html, retryPulseTitle, pulseContent.seoDescription, retryPulseCaption);
         await saveLinkedinPulseBatchResult(row, { linkedinPulsePostUrl: r.postUrl || '', linkedinPulseStatus: r.success ? 'Posted' : 'Failed', linkedinPulseBatch: label, linkedinPulseError: r.error });
         console.log(r.success ? `✅ Posted → ${r.postUrl}` : `❌ Failed: ${r.error}`);
         break;
       }
       case 'calisthenics': {
-        const content = await generateCalisthenicsPost(row);
+        let content = await generateCalisthenicsPost(row);
+        content = ensureTargetUrl(content, row.targetUrl);
         const r = await postToCalisthenicsAccount(row.name, title, content);
         await saveCalisthenicsResultBatch(row, { calisthenicsPostUrl: r.postUrl || '', calisthenicsStatus: r.success ? 'Posted' : 'Failed', calisthenicssBatch: label, calisthenicsError: r.error });
         console.log(r.success ? `✅ Posted → ${r.postUrl}` : `❌ Failed: ${r.error}`);
         break;
       }
       case 'substack': {
-        const content = await generateSubstackPost(row);
+        let content = await generateSubstackPost(row);
+        content = ensureTargetUrl(content, row.targetUrl);
         const r = await postToSubstackAccount(row.name, title, content);
         await saveSubstackBatchResult(row, { substackPostUrl: r.postUrl || '', substackStatus: r.success ? 'Posted' : 'Failed', substackBatch: label, substackError: r.error });
         console.log(r.success ? `✅ Posted → ${r.postUrl}` : `❌ Failed: ${r.error}`);
         break;
       }
-      case 'guffiz': {
-        const content = await generateGuffizPost(row);
-        const r = await postToGuffizAccount(row.name, title, content, row.description);
-        await saveGuffizBatchResult(row, { guffizPostUrl: r.postUrl || '', guffizStatus: r.success ? 'Posted' : 'Failed', guffizBatch: label, guffizError: r.error });
-        console.log(r.success ? `✅ Posted → ${r.postUrl}` : `❌ Failed: ${r.error}`);
-        break;
-      }
-      case 'penzu': {
-        const content = row.blogContent || await generateHackmdPost(row);
-        const r = await postToPenzuAccount(row.name, title, content);
-        await savePenzuBatchResult(row, { penzuPostUrl: r.postUrl || '', penzuStatus: r.success ? 'Posted' : 'Failed', penzuBatch: label, penzuError: r.error });
-        console.log(r.success ? `✅ Posted → ${r.postUrl}` : `❌ Failed: ${r.error}`);
-        break;
-      }
       case 'blogger': {
-        const content = row.blogContent || await generateHackmdPost(row);
+        let content = row.blogContent || await generateHackmdPost(row);
+        content = ensureTargetUrl(content, row.targetUrl);
         const r = await postToBloggerAccount(row.name, title, content);
         await saveBloggerBatchResult(row, { bloggerPostUrl: r.postUrl || '', bloggerStatus: r.success ? 'Posted' : 'Failed', bloggerBatch: label, bloggerError: r.error });
-        console.log(r.success ? `✅ Posted → ${r.postUrl}` : `❌ Failed: ${r.error}`);
-        break;
-      }
-      case 'writeupcafe': {
-        const content = row.blogContent || await generateHackmdPost(row);
-        const r = await postToWriteupCafeAccount(row.name, title, content, row.description, row.seedKeyword);
-        await saveWriteupCafeBatchResult(row, { writeupcafePostUrl: r.postUrl || '', writeupcafeStatus: r.success ? 'Posted' : 'Failed', writeupcafeBatch: label, writeupcafeError: r.error });
         console.log(r.success ? `✅ Posted → ${r.postUrl}` : `❌ Failed: ${r.error}`);
         break;
       }
@@ -1926,24 +3002,100 @@ export async function runRetryRow(rowIndex: number, platform: string): Promise<v
         console.log(r.success ? `✅ Posted → ${r.postUrl}` : `❌ Failed: ${r.error}`);
         break;
       }
+      case 'notion': {
+        const content = row.blogContent || '';
+        if (!content) { console.log('⏭ Skipping — no blog content'); break; }
+        const notionTitle = row.title || row.descriptionTitle || title;
+        const loginResult = await executeBrowserTool('login_notion', { nickname: row.name });
+        if (!loginResult.success) throw new Error(loginResult.error || 'Notion login failed');
+        const r = await executeBrowserTool('post_notion', { title: notionTitle, htmlContent: ensureTargetUrl(content, row.targetUrl) });
+        await saveUnifiedNotionResult(row, { postUrl: r.postUrl || '', status: r.success ? 'Posted' : 'Failed', batch: label, error: r.error });
+        console.log(r.success ? `✅ Posted → ${r.postUrl}` : `❌ Failed: ${r.error}`);
+        break;
+      }
+      case 'naver': {
+        const content = row.blogContent || '';
+        if (!content) { console.log('⏭ Skipping — no blog content'); break; }
+        const naverTitle = row.title || row.descriptionTitle || title;
+        const loginResult = await executeBrowserTool('login_naver', { nickname: row.name });
+        if (!loginResult.success) throw new Error(loginResult.error || 'Naver login failed');
+        const r = await executeBrowserTool('post_naver', { title: naverTitle, htmlContent: ensureTargetUrl(content, row.targetUrl) });
+        await saveUnifiedNaverResult(row, { postUrl: r.postUrl || '', status: r.success ? 'Posted' : 'Failed', batch: label, error: r.error });
+        console.log(r.success ? `✅ Posted → ${r.postUrl}` : `❌ Failed: ${r.error}`);
+        break;
+      }
+      case 'velog': {
+        const content = row.blogContent || '';
+        if (!content) { console.log('⏭ Skipping — no blog content'); break; }
+        const velogTitle = row.title || row.descriptionTitle || title;
+        const loginResult = await executeBrowserTool('login_velog', { nickname: row.name });
+        if (!loginResult.success) throw new Error(loginResult.error || 'Velog login failed');
+        const r = await executeBrowserTool('post_velog', { title: velogTitle, htmlContent: ensureTargetUrl(content, row.targetUrl) });
+        await saveSlotResult(row.rowIndex, 1, 'Velog', { url: r.postUrl || '', status: r.success ? 'Posted' : 'Failed', batch: label, error: r.error });
+        console.log(r.success ? `✅ Posted → ${r.postUrl}` : `❌ Failed: ${r.error}`);
+        break;
+      }
+      case 'coda': {
+        const content = row.blogContent || '';
+        if (!content) { console.log('⏭ Skipping — no blog content'); break; }
+        const codaTitle = row.title || row.descriptionTitle || title;
+        const loginResult = await executeBrowserTool('login_coda', { nickname: row.name });
+        if (!loginResult.success) throw new Error(loginResult.error || 'Coda login failed');
+        const r = await executeBrowserTool('post_coda', { title: codaTitle, htmlContent: ensureTargetUrl(content, row.targetUrl) });
+        await saveUnifiedCodaResult(row, { postUrl: r.postUrl || '', status: r.success ? 'Posted' : 'Failed', batch: label, error: r.error });
+        console.log(r.success ? `✅ Posted → ${r.postUrl}` : `❌ Failed: ${r.error}`);
+        break;
+      }
       case 'x': {
-        const tweets = await generateXThread({ url: row.targetUrl, title: row.title, marketValue: row.marketValue });
-        const r = await runXThreadAgent({ tweets, accountHandle: row.name });
-        await savePostingResult(row, { xPost: tweets[0], xPostUrl: r.tweetUrl || '', xStatus: r.success ? 'Posted' : 'Failed', xError: r.error || '', xBatch: label });
-        console.log(r.success ? `✅ Thread posted → ${r.tweetUrl}` : `❌ Failed: ${r.error}`);
+        let tweet = row.xPost?.trim() || '';
+        if (!tweet) tweet = await generateTweet({ url: row.targetUrl, title: row.title, seoRanking: 999, priority: row.priority ?? 'P3', marketValue: row.marketValue });
+        if (!tweet?.trim()) { console.log('⏭ Skipping — no content'); break; }
+        const r = await runXAgent({ tweetText: tweet, accountHandle: row.name });
+        await saveSocialSlotResult(row.rowIndex, 1, 'X', { url: r.tweetUrl || '', status: r.success ? 'Posted' : 'Failed', error: r.error || '', batch: label });
+        console.log(r.success ? `✅ Posted → ${r.tweetUrl}` : `❌ Failed: ${r.error}`);
         break;
       }
       case 'facebook': {
-        const post = await generateFbPost({ url: row.targetUrl, title: row.title, seoRanking: 1, priority: 'P1', marketValue: row.marketValue });
-        const r = await postToFbAccount(row.name, post);
-        await saveFbBatchResult(row, { fbPost: post, fbPostUrl: r.postUrl || '', fbStatus: r.success ? 'Posted' : 'Failed', fbBatch: label, fbError: r.error });
+        let fbPost = row.fbPost?.trim() || '';
+        const fbAlreadyGenerated = (row.fbStatus || '').trim().toLowerCase() === 'generated';
+        if (!fbPost && fbAlreadyGenerated) { console.log(`⏭ Skipping — FB Status is "Generated" but FB Post is empty (row ${row.rowIndex})`); break; }
+        if (!fbPost) fbPost = await generateFbPost({ url: row.targetUrl, title: row.title, seoRanking: 1, priority: 'P1' });
+        else if (fbPost.length > MAX_POST_LENGTH || hasUnfilledPlaceholder(fbPost)) {
+          console.log(`⚠️  Sanity: sheet FB post ${hasUnfilledPlaceholder(fbPost) ? 'has an unfilled placeholder' : `is ${fbPost.length} chars (over ${MAX_POST_LENGTH})`} — regenerating`);
+          fbPost = await generateFbPost({ url: row.targetUrl, title: row.title, seoRanking: 1, priority: 'P1' });
+        }
+        if (!fbPost?.trim()) { console.log('⏭ Skipping — no content'); break; }
+        const r = await postToFbAccount(row.name, fbPost);
+        fbPost = r.postText || fbPost;
+        await saveFbBatchResult(row, { fbPost, fbPostUrl: r.postUrl || '', fbStatus: r.success ? 'Posted' : 'Failed', fbBatch: label, fbError: r.error });
         console.log(r.success ? `✅ Posted → ${r.postUrl}` : `❌ Failed: ${r.error}`);
         break;
       }
       case 'linkedin': {
-        const post = await generateLiPost({ url: row.targetUrl, title: row.title, seoRanking: 1, priority: 'P1', marketValue: row.marketValue });
-        const r = await postToLiAccount(row.name, post);
-        await saveLiBatchResult(row, { liPost: post, liPostUrl: r.postUrl || '', liStatus: r.success ? 'Posted' : 'Failed', liBatch: label, liError: r.error });
+        let liPost = row.linkedinPost?.trim() || '';
+        const liAlreadyGenerated = (row.linkedinStatus || '').trim().toLowerCase() === 'generated';
+        if (!liPost && liAlreadyGenerated) { console.log(`⏭ Skipping — LinkedIn Status is "Generated" but LinkedIn Post is empty (row ${row.rowIndex})`); break; }
+        if (!liPost) liPost = await generateLiPost({ url: row.targetUrl, title: row.title, seoRanking: 1, priority: 'P1' });
+        else if (liPost.length > MAX_POST_LENGTH || hasUnfilledPlaceholder(liPost)) {
+          console.log(`⚠️  Sanity: sheet LI post ${hasUnfilledPlaceholder(liPost) ? 'has an unfilled placeholder' : `is ${liPost.length} chars (over ${MAX_POST_LENGTH})`} — regenerating`);
+          liPost = await generateLiPost({ url: row.targetUrl, title: row.title, seoRanking: 1, priority: 'P1' });
+        }
+        if (!liPost?.trim()) { console.log('⏭ Skipping — no content'); break; }
+        const r = await postToLiAccount(row.name, liPost);
+        liPost = r.postText || liPost;
+        await saveLiBatchResult(row, { liPost, liPostUrl: r.postUrl || '', liStatus: r.success ? 'Posted' : 'Failed', liBatch: label, liError: r.error });
+        console.log(r.success ? `✅ Posted → ${r.postUrl}` : `❌ Failed: ${r.error}`);
+        break;
+      }
+      case 'paragraph': {
+        let content = row.blogContent || '';
+        if (!content) { console.log('⏭ Skipping — no blog content'); break; }
+        content = ensureTargetUrl(content, row.targetUrl);
+        const paraTitle = row.title || row.descriptionTitle || title;
+        const loginResult = await executeBrowserTool('login_paragraph', { nickname: row.name });
+        if (!loginResult.success) throw new Error(loginResult.error || 'Paragraph login failed');
+        const r = await executeBrowserTool('post_paragraph', { title: paraTitle, htmlContent: content });
+        await saveUnifiedParagraphResult(row, { postUrl: r.postUrl || '', status: r.success ? 'Posted' : 'Failed', batch: label, error: r.error });
         console.log(r.success ? `✅ Posted → ${r.postUrl}` : `❌ Failed: ${r.error}`);
         break;
       }
@@ -2057,7 +3209,7 @@ export async function saveGoogleSiteSession(nickname: string): Promise<void> {
     console.log(`🔐 Email: ${account.email}`);
     console.log(`\n🌐 Opening browser for manual login...\n`);
 
-    await loginToGoogleSite({ nickname });
+    await loginToGoogleSite({ nickname, headless: false });
 
     console.log(`\n✅ Login detected!`);
     console.log(`✅ Session saved to ${account.sessionDir}`);
@@ -2103,22 +3255,159 @@ export async function saveSubstackSession(nickname: string): Promise<void> {
   }
 }
 
-// ── Save Guffiz Session ──────────────────────────────────────────────────────
+// ── Save Note Session ────────────────────────────────────────────────────────
 
-export async function saveGuffizSession(nickname: string): Promise<void> {
+export async function saveNoteSession(nickname: string): Promise<void> {
   try {
-    console.log(`\n📝 Saving Guffiz session for: ${nickname}\n`);
+    console.log(`\n📝 Saving Note session for: ${nickname}\n`);
 
-    const { loginToGuffiz } = await import('../browser/guffiz/login.js');
-    await loginToGuffiz({ nickname, manualMode: true });
+    const { loginToNote, getNoteAccountByNickname } = await import('../browser/note/login.js');
+
+    const account = getNoteAccountByNickname(nickname);
+    if (!account) {
+      console.error(`❌ Account not found: ${nickname}`);
+      return;
+    }
+
+    console.log(`🔐 Email: ${account.email}`);
+    console.log(`\n🌐 Opening browser — complete login then press Y + Enter...\n`);
+
+    await loginToNote({ nickname });
 
     console.log(`\n✅ Login detected!`);
-    console.log(`✅ Session saved.`);
-    console.log(`\n✅ You can now run Guffiz batches without re-login.\n`);
+    console.log(`✅ Session saved to .sessions/note/`);
+    console.log(`\n✅ You can now run Note batches without re-login.\n`);
 
   } catch (err: any) {
-    console.error(`❌ Error saving Guffiz session: ${err.message}\n`);
+    console.error(`❌ Error saving Note session: ${err.message}\n`);
   }
+}
+
+// ── Paragraph Batch ───────────────────────────────────────────────────────────
+
+export async function runParagraphBatch(batchNum: number = 1): Promise<void> {
+  console.log(`\n[PARAGRAPH BATCH] Starting...`);
+  const rows = await getRowsForContinuousParagraphPosting(15);
+  if (rows.length === 0) { console.log('[PARAGRAPH BATCH] No rows available'); return; }
+  const batchLabel = `Batch ${batchNum}`;
+  console.log(`  Found ${rows.length} rows ready for Paragraph (${batchLabel})`);
+  let posted = 0, failed = 0;
+  for (const row of rows) {
+    try {
+      console.log(`\n  Processing: ${row.title.slice(0, 60)}`);
+      let content = row.blogContent || '';
+      const title = row.title || row.descriptionTitle || '';
+      if (!content) {
+        await saveUnifiedParagraphResult(row, { postUrl: '', status: 'Failed', batch: batchLabel, error: 'No blog content' });
+        failed++;
+        continue;
+      }
+      content = ensureTargetUrl(content, row.targetUrl);
+      const loginResult = await executeBrowserTool('login_paragraph', { nickname: row.name });
+      if (!loginResult.success) throw new Error(loginResult.error || 'Login failed');
+      const postResult = await executeBrowserTool('post_paragraph', { title, htmlContent: content });
+      if (postResult.success) {
+        await saveUnifiedParagraphResult(row, { postUrl: postResult.postUrl || '', status: 'Posted', batch: batchLabel });
+        recordPost('paragraph');
+        console.log(`    ✅ Posted → ${postResult.postUrl}`);
+        posted++;
+      } else {
+        await saveUnifiedParagraphResult(row, { postUrl: '', status: 'Failed', batch: batchLabel, error: postResult.error });
+        failed++;
+      }
+    } catch (err: any) {
+      console.error(`  ❌ Row ${row.rowIndex}: ${err.message}`);
+      try { await saveUnifiedParagraphResult(row, { postUrl: '', status: 'Error', batch: batchLabel, error: err.message }); } catch {}
+      failed++;
+    }
+    await new Promise(r => setTimeout(r, 1000));
+  }
+  console.log(`\n[PARAGRAPH BATCH] ${batchLabel} complete: ${posted}/${rows.length} posted, ${failed} failed`);
+}
+
+// ── Content Pool Group Batches ────────────────────────────────────────────────
+// Claims a fresh block of rows from the "Content Pool" tab and posts that same
+// block to every platform in the group, using account nicknames that already
+// exist in .accounts/*.json (round-robin, row order → account order).
+
+const ACCOUNT_NAMES_15 = [
+  'aniket', 'krishi', 'sameeksha', 'hritika', 'meenakshi', 'vansh', 'kamakshi',
+  'vishal', 'pranav', 'shrey', 'sanya', 'shivani', 'vijay', 'avdhesh', 'abhinav',
+];
+
+const ACCOUNT_NAMES_25 = [
+  ...ACCOUNT_NAMES_15,
+  'saksham', 'yash', 'nandika', 'mahi', 'manik', 'gautam', 'ananya', 'arnav', 'snehal', 'piyush',
+];
+
+type GroupPlatform =
+  | 'linkedinPulse' | 'linkmate' | 'calisthenics'
+  | 'devto' | 'hackmd' | 'wordpress'
+  | 'blogger' | 'notion' | 'naver' | 'coda'
+  | 'medium' | 'googleSite';
+
+const GROUP_PLATFORM_RUNNERS: Record<GroupPlatform, (batchNum: number, rowsOverride?: SheetRow[]) => Promise<void>> = {
+  linkedinPulse: runLinkedinPulseBatch,
+  linkmate: runLinkmateBatch,
+  calisthenics: runCalisthenicsNBatch,
+  devto: runDevtoBatch,
+  hackmd: runHackmdBatch,
+  wordpress: runWordpressBatch,
+  blogger: runBloggerBatch,
+  notion: runNotionBatch,
+  naver: runNaverBatch,
+  coda: runCodaBatch,
+  medium: runMediumBatch,
+  googleSite: runGoogleSiteBatch,
+};
+
+// Medium + Google Site only — unchanged from before, own dedicated columns,
+// still using the block-claim + post-every-platform-to-every-row model.
+// (Naver deliberately excluded from all grouping for now.)
+// Medium and Google Sites now post via their own standalone slot-based cron
+// entries (slot 1 and slot 2 on New Logic) instead of through this group —
+// Group4/Group4b still run and still claim rows + assign "New Name" via
+// claimNextRowsForGroup (that rotation is still needed), but no longer post
+// anything themselves, hence the empty platforms lists below.
+export const GROUP_DEFS: Record<string, { platforms: GroupPlatform[]; accountCount: 15 | 25; batchNum: number }> = {
+  Group4:  { platforms: [],                      accountCount: 25, batchNum: 1 },
+  Group4b: { platforms: [],                                 accountCount: 25, batchNum: 2 },
+};
+
+export async function runGroupBatch(
+  groupName: string,
+  platforms: GroupPlatform[],
+  accountCount: 15 | 25,
+  batchNum: number = 1
+): Promise<void> {
+  console.log(`\n[GROUP BATCH: ${groupName}] Starting — platforms: ${platforms.join(', ')} (${accountCount} rows)`);
+
+  const accountNames = accountCount === 25 ? ACCOUNT_NAMES_25 : ACCOUNT_NAMES_15;
+  // Medium and Google Sites exclusively use New Name; never read or write Name.
+  const rows = await claimNextRowsForGroup(groupName, accountCount, accountNames, 'newLogic', 'newName');
+  if (rows.length === 0) {
+    console.log(`[GROUP BATCH: ${groupName}] No unclaimed rows available — skipping.`);
+    return;
+  }
+
+  rows.forEach(row => { row.sheetType = 'newLogic'; });
+
+  console.log(`[GROUP BATCH: ${groupName}] Claimed ${rows.length} rows — posting sequentially to: ${platforms.join(', ')}`);
+
+  for (const platform of platforms) {
+    const runner = GROUP_PLATFORM_RUNNERS[platform];
+    if (!runner) {
+      console.warn(`[GROUP BATCH: ${groupName}] Unknown platform "${platform}" — skipping.`);
+      continue;
+    }
+    try {
+      await runner(batchNum, rows);
+    } catch (err: any) {
+      console.error(`[GROUP BATCH: ${groupName}] Platform "${platform}" batch threw: ${err.message}`);
+    }
+  }
+
+  console.log(`\n[GROUP BATCH: ${groupName}] Complete.`);
 }
 
 // ── Save HackMD Session ──────────────────────────────────────────────────────

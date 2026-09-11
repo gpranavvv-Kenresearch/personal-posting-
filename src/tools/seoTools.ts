@@ -5,7 +5,7 @@
 
 import { callSerpApi } from '../config/serpApiClient.js';
 import { callTavily } from '../config/tavilyClient.js';
-import type { Tool } from '@anthropic-ai/sdk/resources/messages.js';
+import type { Tool } from './browserTools.js';
 
 export interface SerpApiResult {
   ranking: number;

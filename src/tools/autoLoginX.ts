@@ -1,4 +1,4 @@
-/**
+﻿/**
  * autoLoginX.ts — Auto-login to X for all accounts and save persistent sessions
  * Usage: npx tsx src/tools/autoLoginX.ts
  *        npx tsx src/tools/autoLoginX.ts aniket        (single account)
@@ -21,10 +21,11 @@ async function loginAccount(nickname: string, username: string, password: string
   let ctx: any = null;
   try {
     ctx = await chromium.launchPersistentContext(absSessionDir, {
-      headless: false,
+      headless: true,
       channel: 'chrome',
+      args: ['--start-minimized'],
       slowMo: 80,
-      ignoreDefaultArgs: ['--enable-automation', '--no-sandbox'],
+      ignoreDefaultArgs: ['--enable-automation'],
       viewport: { width: 1280, height: 900 },
     });
 
@@ -196,3 +197,4 @@ async function main() {
 }
 
 main().catch(console.error);
+

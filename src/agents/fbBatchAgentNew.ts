@@ -3,13 +3,9 @@
  * Posts from 15 FB accounts SEQUENTIALLY (not parallel)
  */
 
-import Anthropic from '@anthropic-ai/sdk';
-import { BROWSER_TOOLS, executeBrowserTool } from '../tools/browserTools.js';
+import { executeBrowserTool } from '../tools/browserTools.js';
 import { getAccounts } from '../config/accounts.js';
-import type { MessageParam } from '@anthropic-ai/sdk/resources/messages.js';
 import type { SheetRow } from '../sheets/sheets.js';
-
-const MODEL = 'claude-opus-4-1';
 
 export interface FbBatchResult {
   posted: number;
@@ -69,121 +65,23 @@ export async function runFbBatchAgent(params: {
 }
 
 /**
- * Post to single FB account
+ * Post to single FB account — direct tool calls, no LLM
  */
 async function postToFbAccount(nickname: string, postText: string): Promise<{
   success: boolean;
   postUrl?: string;
   error?: string;
 }> {
-  const client = new Anthropic({
-    apiKey: process.env.ANTHROPIC_API_KEY,
-  });
-
-  const systemPrompt = `You are a Facebook posting specialist. Post the given text to Facebook.
-
-Steps:
-1. Call login_facebook with the account nickname
-2. Call post_facebook with the post text
-3. Return result as JSON
-
-Return format: { "success": boolean, "postUrl": string or null, "error": string or null }`;
-
-  const userPrompt = `Post this to Facebook account (${nickname}):
-
-"${postText}"
-
-Return ONLY JSON with the result.`;
-
-  let messages: MessageParam[] = [
-    { role: 'user', content: userPrompt },
-  ];
-
   try {
-    for (let attempt = 0; attempt < 2; attempt++) {
-      const response = await client.messages.create({
-        model: MODEL,
-        max_tokens: 1024,
-        system: systemPrompt,
-        tools: BROWSER_TOOLS,
-        messages,
-      });
-
-      if (response.stop_reason === 'end_turn') {
-        return parseFbResult(response.content);
-      }
-
-      const toolUses = response.content.filter(b => b.type === 'tool_use');
-      if (toolUses.length === 0) {
-        return parseFbResult(response.content);
-      }
-
-      messages.push({
-        role: 'assistant',
-        content: response.content,
-      });
-
-      // Execute tools
-      const toolResults = await Promise.all(
-        toolUses.map(async (tu) => ({
-          type: 'tool_result' as const,
-          tool_use_id: tu.id,
-          content: JSON.stringify(
-            await executeBrowserTool(tu.name, tu.input as Record<string, any>),
-          ),
-        })),
-      );
-
-      messages.push({
-        role: 'user',
-        content: toolResults,
-      });
-
-      // Check if successful
-      if (toolResults.some(r => JSON.parse(r.content).success)) {
-        const finalResponse = await client.messages.create({
-          model: MODEL,
-          max_tokens: 512,
-          system: systemPrompt,
-          tools: BROWSER_TOOLS,
-          messages,
-        });
-
-        return parseFbResult(finalResponse.content);
-      }
+    const loginResult = await executeBrowserTool('login_facebook', { nickname });
+    if (!loginResult.success) {
+      return { success: false, error: loginResult.error || 'Login failed' };
     }
-
-    return { success: false, error: 'Failed to post to Facebook' };
-  } catch (err: any) {
-    return { success: false, error: err.message };
-  }
-}
-
-/**
- * Parse FB result
- */
-function parseFbResult(content: any[]): {
-  success: boolean;
-  postUrl?: string;
-  error?: string;
-} {
-  const textContent = content.find(b => b.type === 'text');
-  if (!textContent || textContent.type !== 'text') {
-    return { success: false, error: 'No response' };
-  }
-
-  try {
-    const text = textContent.text;
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) {
-      return { success: false, error: 'Could not parse response' };
-    }
-
-    const parsed = JSON.parse(jsonMatch[0]);
+    const postResult = await executeBrowserTool('post_facebook', { nickname, postText });
     return {
-      success: parsed.success ?? false,
-      postUrl: parsed.postUrl,
-      error: parsed.error,
+      success: postResult.success ?? false,
+      postUrl: postResult.postUrl,
+      error: postResult.error,
     };
   } catch (err: any) {
     return { success: false, error: err.message };

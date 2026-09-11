@@ -1,8 +1,6 @@
-import { chromium, Browser, BrowserContext, Page } from 'playwright';
+﻿import { chromium, BrowserContext, Page } from 'playwright';
 import { humanDelay } from '../stagehand.js';
 import { Account } from '../../config/accounts.js';
-import { ChildProcess, spawn } from 'child_process';
-import net from 'net';
 import path from 'path';
 import fs from 'fs';
 import 'dotenv/config';
@@ -10,33 +8,89 @@ import { killChromeForProfile } from '../../utils/killChrome.js';
 
 let browserContext: BrowserContext | null = null;
 let loginPage: Page | null = null;
-let browser: Browser | null = null;
-let chromeProcess: ChildProcess | null = null;
 
 export async function closeBrowser() {
-  if (browserContext) {
-    try {
-      await browserContext.close();
-    } catch { /* already closed */ }
-    browserContext = null;
+  // Close via persistent context — properly flushes cookies to disk before closing
+  if (loginPage) {
+    await loginPage.close().catch(() => {});
     loginPage = null;
   }
-
-  if (browser) {
-    try {
-      await browser.close();
-    } catch { /* already closed */ }
-    browser = null;
+  if (browserContext) {
+    await browserContext.close().catch(() => {});
+    browserContext = null;
   }
-
-  if (chromeProcess) {
-    try {
-      chromeProcess.kill();
-    } catch { /* already closed */ }
-    chromeProcess = null;
-  }
-
   console.log('   Browser closed.');
+}
+
+async function launchPersistentChrome(profileDir: string): Promise<{ context: BrowserContext; page: Page }> {
+  const chromePath = process.env.CHROME_PATH || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+  fs.mkdirSync(profileDir, { recursive: true });
+  await killChromeForProfile(profileDir);
+
+  const context = await chromium.launchPersistentContext(profileDir, {
+    headless: false,
+    chromiumSandbox: true,
+    executablePath: fs.existsSync(chromePath) ? chromePath : undefined,
+    channel: fs.existsSync(chromePath) ? undefined : 'chrome',
+    ignoreDefaultArgs: ['--enable-automation'],
+  });
+
+  // Needed for the "Share → Copy link" step in poster.ts to read the tweet URL
+  await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+
+  await context.addInitScript(() => {
+    // Remove Playwright/CDP artifacts that automation detectors look for
+    const win = window as any;
+    delete win.cdc_adoQpoasnfa76pfcZLmcfl_Array;
+    delete win.cdc_adoQpoasnfa76pfcZLmcfl_Promise;
+    delete win.cdc_adoQpoasnfa76pfcZLmcfl_Symbol;
+    delete win.__playwright;
+    delete win.__pw_manual;
+    delete win.__PW_inspect_computed_accessibility_info;
+
+    // webdriver must return undefined (not false) — false is itself a signal
+    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+
+    // Realistic platform/hardware fingerprint
+    Object.defineProperty(navigator, 'platform', { get: () => 'Win32' });
+    Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+    Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
+
+    // Real Chrome always has plugins; empty list is a bot signal
+    Object.defineProperty(navigator, 'plugins', {
+      get: () => {
+        const arr: any[] = [
+          { name: 'Chrome PDF Plugin',  description: 'Portable Document Format', filename: 'internal-pdf-viewer', length: 0 },
+          { name: 'Chrome PDF Viewer',  description: '',                          filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', length: 0 },
+          { name: 'Native Client',      description: '',                          filename: 'internal-nacl-plugin', length: 0 },
+        ];
+        Object.defineProperty(arr, 'item', { value: (i: number) => arr[i] });
+        Object.defineProperty(arr, 'namedItem', { value: (n: string) => arr.find(p => p.name === n) || null });
+        return arr;
+      },
+    });
+
+    // Permissions query — sites probe notification state to fingerprint bots
+    const _origQuery = navigator.permissions.query.bind(navigator.permissions);
+    navigator.permissions.query = (desc: any) =>
+      desc.name === 'notifications'
+        ? Promise.resolve({ state: (win.Notification || {}).permission || 'default', onchange: null } as PermissionStatus)
+        : _origQuery(desc);
+
+    // Full chrome object — absence is detected
+    win.chrome = {
+      app: { isInstalled: false, InstallState: { DISABLED: 'disabled', INSTALLED: 'installed', NOT_INSTALLED: 'not_installed' }, RunningState: { CANNOT_RUN: 'cannot_run', READY_TO_RUN: 'ready_to_run', RUNNING: 'running' } },
+      runtime: { id: undefined, onConnect: { addListener: () => {} }, onMessage: { addListener: () => {} } },
+      loadTimes: () => ({}),
+      csi: () => ({}),
+    };
+  });
+
+  const pages = context.pages();
+  const page = pages[0] || await context.newPage();
+  page.on('dialog', async (d) => { await d.dismiss().catch(() => {}); });
+
+  return { context, page };
 }
 
 const SESSION_DIR = path.resolve('.sessions/chrome-profile');
@@ -50,7 +104,7 @@ async function hasLoggedInXUi(page: Page): Promise<boolean> {
   ];
 
   for (const selector of loggedInSelectors) {
-    const visible = await page.locator(selector).first().isVisible({ timeout: 1500 }).catch(() => false);
+    const visible = await page.locator(selector).first().isVisible({ timeout: 5000 }).catch(() => false);
     if (visible) return true;
   }
 
@@ -65,68 +119,6 @@ async function saveXLoginDebug(page: Page, handle: string, step: string): Promis
   return outDir;
 }
 
-async function getFreePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const server = net.createServer();
-    server.once('error', reject);
-    server.listen(0, '127.0.0.1', () => {
-      const address = server.address();
-      if (!address || typeof address === 'string') {
-        server.close(() => reject(new Error('Could not allocate a local CDP port')));
-        return;
-      }
-      const port = address.port;
-      server.close(() => resolve(port));
-    });
-  });
-}
-
-async function waitForCdp(port: number): Promise<void> {
-  const endpoint = `http://127.0.0.1:${port}/json/version`;
-  const startedAt = Date.now();
-
-  while (Date.now() - startedAt < 15000) {
-    try {
-      const response = await fetch(endpoint);
-      if (response.ok) return;
-    } catch {
-      // Chrome is still starting.
-    }
-    await new Promise(resolve => setTimeout(resolve, 300));
-  }
-
-  throw new Error(`Chrome CDP endpoint did not start on port ${port}`);
-}
-
-async function launchFreshChrome(handle: string): Promise<{ browser: Browser; context: BrowserContext; page: Page }> {
-  const chromePath = process.env.CHROME_PATH || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
-  if (!fs.existsSync(chromePath)) {
-    throw new Error(`Chrome not found at ${chromePath}. Set CHROME_PATH env var to your chrome.exe path.`);
-  }
-
-  const port = await getFreePort();
-  const profileDir = path.resolve('.sessions', `fresh-chrome-${handle}-${Date.now()}`);
-  fs.mkdirSync(profileDir, { recursive: true });
-
-  chromeProcess = spawn(chromePath, [
-    `--remote-debugging-port=${port}`,
-    `--user-data-dir=${profileDir}`,
-    '--new-window',
-    'about:blank',
-  ], {
-    detached: false,
-    stdio: 'ignore',
-  });
-
-  await waitForCdp(port);
-
-  const connectedBrowser = await chromium.connectOverCDP(`http://127.0.0.1:${port}`);
-  const context = connectedBrowser.contexts()[0];
-  const pages = context.pages();
-  const page = pages[0] || await context.newPage();
-
-  return { browser: connectedBrowser, context, page };
-}
 
 function getSessionStatePath(account?: Account): string | null {
   const candidate =
@@ -144,80 +136,25 @@ function getSessionProfileDir(account?: Account): string {
 }
 
 async function launchSavedSessionChrome(account: Account | undefined, handle: string): Promise<Page | null> {
-  const chromePath = process.env.CHROME_PATH || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
-  const statePath = getSessionStatePath(account);
+  const sessionDir = getSessionProfileDir(account);
 
-  if (statePath) {
-    if (!fs.existsSync(statePath)) {
-      console.warn(`   X storage-state JSON not found: ${statePath}`);
-      return null;
-    }
-
-    console.log(`   Using X storage-state JSON: ${statePath}`);
-    browser = await chromium.launch({
-      headless: false,
-      executablePath: fs.existsSync(chromePath) ? chromePath : undefined,
-      channel: fs.existsSync(chromePath) ? undefined : 'chrome',
-      slowMo: 50,
-      ignoreDefaultArgs: ['--enable-automation', '--no-sandbox'],
-      args: ['--disable-blink-features=AutomationControlled'],
-    });
-    browserContext = await browser.newContext({
-      storageState: statePath,
-      viewport: { width: 1280, height: 900 },
-    });
-    await browserContext.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: 'https://x.com' }).catch(() => {});
-    loginPage = await browserContext.newPage();
-  } else {
-    const sessionDir = getSessionProfileDir(account);
-    if (!fs.existsSync(sessionDir)) {
-      console.warn(`   X session folder not found: ${sessionDir}`);
-      return null;
-    }
-
-    killChromeForProfile(sessionDir);
-
-    console.log(`   Using X session folder: ${sessionDir}`);
-    browserContext = await chromium.launchPersistentContext(sessionDir, {
-      headless: false,
-      executablePath: fs.existsSync(chromePath) ? chromePath : undefined,
-      channel: fs.existsSync(chromePath) ? undefined : 'chrome',
-      slowMo: 50,
-      ignoreDefaultArgs: ['--enable-automation', '--no-sandbox'],
-      viewport: { width: 1280, height: 900 },
-      args: [
-        '--no-sandbox',
-        '--disable-blink-features=AutomationControlled',
-        '--disable-renderer-backgrounding',
-        '--disable-background-timer-throttling',
-        '--disable-backgrounding-occluded-windows',
-        '--no-first-run',
-        '--no-default-browser-check',
-        '--disable-session-crashed-bubble',
-        '--disable-infobars',
-      ],
-    });
-    await browserContext.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: 'https://x.com' }).catch(() => {});
-    const pages = browserContext.pages();
-    loginPage = pages[0] || await browserContext.newPage();
+  if (!fs.existsSync(sessionDir)) {
+    console.warn(`   X session folder not found: ${sessionDir}`);
+    return null;
   }
 
-  loginPage.on('dialog', async (dialog) => {
-    console.warn(`   Dialog dismissed: ${dialog.type()} ${dialog.message()}`);
-    await dialog.dismiss().catch(() => {});
-  });
+  console.log(`   Loading X session: ${sessionDir}`);
+  const { context, page } = await launchPersistentChrome(sessionDir);
+  browserContext = context;
+  loginPage = page;
 
+  // No login verification — session dir exists, so trust it and go straight
+  // to automation. Skips hasLoggedInXUi() entirely.
   await loginPage.goto('https://x.com/home', { waitUntil: 'domcontentloaded', timeout: 60000 });
-  await humanDelay(2500, 3500);
+  await humanDelay(3000, 4000);
 
-  if (await hasLoggedInXUi(loginPage)) {
-    console.log(`   X session is logged in for ${handle}`);
-    return loginPage;
-  }
-
-  console.warn(`   X saved session is not logged in for ${handle}`);
-  await closeBrowser().catch(() => {});
-  return null;
+  console.log(`   ✅ Opened X session for ${handle} (login not checked)`);
+  return loginPage;
 }
 
 /**
@@ -239,7 +176,7 @@ export function isSessionReady(account?: Account): boolean {
 
 export async function loginToX(account?: Account): Promise<Page> {
   // Close any existing browser before opening a new one (prevents two browsers from appearing)
-  if (browserContext || browser) {
+  if (browserContext) {
     console.log('   Closing existing browser before opening new one...');
     await closeBrowser();
   }
@@ -260,24 +197,16 @@ export async function loginToX(account?: Account): Promise<Page> {
     throw new Error(`X_CREDENTIALS_MISSING:${handle} — account username/password or X_USERNAME/X_PASSWORD env vars are required`);
   }
 
-  console.log('   Launching fresh real Chrome...');
-
-  // Start Google Chrome as a normal process, then attach over CDP. This avoids
-  // Playwright's normal launch-time browser flags while still giving us a Page.
-  const launched = await launchFreshChrome(handle);
-  browser = launched.browser;
+  console.log('   Launching fresh Chrome for login...');
+  const properSessionDir = getSessionProfileDir(account);
+  const launched = await launchPersistentChrome(properSessionDir);
   browserContext = launched.context;
+  loginPage = launched.page;
 
   browserContext.on('page', async (newPage) => {
     if (!loginPage || newPage === loginPage) return;
     console.warn(`   Closing unexpected new tab: ${newPage.url()}`);
     await newPage.close().catch(() => {});
-  });
-
-  loginPage = launched.page;
-  loginPage.on('dialog', async (dialog) => {
-    console.warn(`   Dialog dismissed: ${dialog.type()} ${dialog.message()}`);
-    await dialog.dismiss().catch(() => {});
   });
 
   console.log('   Browser launched!');
@@ -432,3 +361,4 @@ export async function loginToX(account?: Account): Promise<Page> {
   console.log('✅ Login done!');
   return loginPage;
 }
+

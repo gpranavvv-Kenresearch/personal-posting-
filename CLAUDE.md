@@ -34,7 +34,9 @@ Automatically distribute Ken Research blog content across 12 platforms (3 social
 ```
 src/
   index.ts                    Entry point (15+ CLI modes)
-  scheduler-new.ts            Cron daemon (Asia/Kolkata)
+  scheduler-new.ts            Cron daemon (Asia/Kolkata) — DAILY_SLOTS table drives cron + catch-up
+  batchLedger.ts              Slot ledger, missed-slot catch-up sweeper, heartbeat
+  supervisor.ts               Restarts a frozen daemon (heartbeat watchdog) — npm run dev:supervised
   monitor.ts                  Error monitoring + auto-fix
   errorInterceptor.ts         Error KB + logging
   autoFix.ts                  Self-healing (session clear, restart, rotate)
@@ -115,6 +117,8 @@ Google Sheets (source rows)
 ## Key npm Scripts
 ```bash
 npm run dev              # Start cron daemon
+npm run dev:supervised   # Start cron daemon under the heartbeat supervisor (preferred)
+npm run ledger           # Show today's slot ledger (done / running / error)
 npm run once             # Run once immediately
 npm run schedule         # Start scheduler
 npm run accounts         # Manage X accounts
@@ -124,20 +128,28 @@ npm run linkedin-post    # LinkedIn posting
 ```
 
 ## Platforms & Schedule (IST)
-| Platform        | Batches/Day | Accounts | Posts/Day |
-|-----------------|-------------|----------|-----------|
-| X               | 9           | 15       | ~135      |
-| Facebook        | 5           | 13       | ~65       |
-| LinkedIn        | 3           | 15       | ~45       |
-| Google Sites    | 2           | 16       | ~32       |
-| HackMD          | 2           | 15       | ~30       |
-| Linkmate        | 2           | 15       | ~30       |
-| Guffiz          | 2           | 15       | ~30       |
-| Calisthenics    | 2           | 1        | ~2        |
-| Substack        | 1           | 15       | ~15       |
-| Dev.to          | 1           | 15       | ~15       |
-| LinkedIn Pulse  | 1           | 15       | ~15       |
-| Medium          | 1           | 15       | ~15       |
+Cron source of truth: `src/scheduler-new.ts` (10:30–18:00 IST, 35 batches/day).
+
+| Platform        | Batches/Day |
+|-----------------|-------------|
+| Facebook        | 5           |
+| LinkedIn        | 3           |
+| Google Sites    | 3           |
+| Calisthenics    | 3           |
+| X               | 2           |
+| Naver           | 2           |
+| HackMD          | 2           |
+| Linkmate        | 2           |
+| Notion          | 2           |
+| Blogger         | 2           |
+| Paragraph       | 2           |
+| Dev.to          | 2           |
+| WordPress       | 2           |
+| Coda            | 1           |
+| LinkedIn Pulse  | 1           |
+| Medium          | 1           |
+
+Not yet in cron: Substack, Patreon, Note (agents exist, pending sessions/wiring). Ameba removed.
 
 ## Environment Variables
 - `ANTHROPIC_API_KEY` — Claude API

@@ -1,7 +1,8 @@
-import { chromium, BrowserContext, Page } from 'playwright';
+﻿import { chromium, BrowserContext, Page } from 'playwright';
 import path from 'path';
 import fs from 'fs';
 import 'dotenv/config';
+import { killChromeForProfile } from '../../utils/killChrome.js';
 
 const WORDPRESS_ACCOUNTS_FILE = '.accounts/accounts-wordpress.json';
 const SESSION_ROOT = path.resolve('.sessions/wordpress');
@@ -68,19 +69,19 @@ export async function loginToWordpress(options?: {
   if (!fs.existsSync(sessionDir)) {
     fs.mkdirSync(sessionDir, { recursive: true });
   }
+  await killChromeForProfile(sessionDir);
 
   console.log(`   Using session folder: ${sessionDir}`);
   console.log('   Launching WordPress browser...');
 
   browserContext = await chromium.launchPersistentContext(sessionDir, {
-    headless: false,
+    headless: true,
     executablePath: chromePath,
     viewport: null,
     slowMo: 50,
     ignoreDefaultArgs: ['--enable-automation'],
     args: [
-      '--no-sandbox',
-      '--start-maximized',
+      '--start-minimized',
       '--disable-blink-features=AutomationControlled',
       '--disable-renderer-backgrounding',
       '--disable-background-timer-throttling',
@@ -168,3 +169,4 @@ export async function loginToWordpress(options?: {
   console.log(`   ✅ Login successful`);
   return page;
 }
+

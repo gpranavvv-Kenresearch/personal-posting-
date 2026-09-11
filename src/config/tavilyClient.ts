@@ -26,7 +26,12 @@ function loadKeys(): string[] {
 
 // ── State persistence ───────────────────────────────────────────────────────
 
-function loadState(): { currentIndex: number } {
+interface TavilyState {
+  currentIndex: number;
+  pausedUntil?: number; // epoch ms — set once every key is found exhausted in one pass
+}
+
+function loadState(): TavilyState {
   try {
     const raw = fs.readFileSync(STATE_FILE, 'utf-8');
     return JSON.parse(raw);
@@ -35,14 +40,23 @@ function loadState(): { currentIndex: number } {
   }
 }
 
-function saveState(index: number): void {
+function saveState(state: TavilyState): void {
   try {
     fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true });
-    fs.writeFileSync(STATE_FILE, JSON.stringify({ currentIndex: index }, null, 2));
+    fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
   } catch {
     console.warn('   ⚠️  Could not save Tavily key state');
   }
 }
+
+// Once every key has been found exhausted in one pass, stop even trying —
+// fetchMarketData() (contentAgentNew.ts) silently swallows a Tavily failure
+// either way, but without this every single post generation call was still
+// paying for 10 sequential failed HTTP round trips first (real, noticeable
+// delay per post, confirmed 2026-08-27). Pause instead, and self-heal:
+// re-attempt automatically once the pause expires, same circuit-breaker
+// pattern as modelHealthTracker.ts for the LLM pools.
+const PAUSE_MS = 6 * 60 * 60 * 1000; // 6 hours
 
 // ── Interfaces ──────────────────────────────────────────────────────────────
 
@@ -95,8 +109,14 @@ async function makeRequest(key: string, params: TavilySearchParams): Promise<Tav
     }),
   });
 
-  // Credits exhausted / unauthorized → rotate key
-  if (res.status === 401 || res.status === 429) {
+  // Credits/quota exhausted or unauthorized → rotate key. 432 is Tavily's own
+  // "plan usage limit exceeded" status (confirmed live 2026-08-27) — it was
+  // missing here, so a single key hitting its plan cap threw immediately
+  // instead of rotating to the other 9 keys, silently killing market-data
+  // enrichment (no CAGR/market-size numbers) for the rest of that call chain.
+  // 402 (Payment Required) is the same class of error on other providers'
+  // conventions — included defensively in case Tavily ever uses it too.
+  if (res.status === 401 || res.status === 402 || res.status === 429 || res.status === 432) {
     const err = new Error('CREDITS_EXHAUSTED');
     (err as NodeJS.ErrnoException).code = String(res.status);
     throw err;
@@ -119,6 +139,12 @@ export async function callTavily(params: TavilySearchParams): Promise<TavilyResp
   }
 
   const state = loadState();
+
+  if (state.pausedUntil && Date.now() < state.pausedUntil) {
+    const minsLeft = Math.ceil((state.pausedUntil - Date.now()) / 60000);
+    throw new Error(`Tavily paused (all keys were exhausted) — retrying in ${minsLeft}m. Skipping to save time instead of retrying all ${keys.length} keys.`);
+  }
+
   let index = state.currentIndex % keys.length;
   const startIndex = index;
   let attempts = 0;
@@ -127,7 +153,7 @@ export async function callTavily(params: TavilySearchParams): Promise<TavilyResp
     const keyNum = index + 1;
     try {
       const result = await makeRequest(keys[index], params);
-      if (index !== state.currentIndex) saveState(index);
+      if (index !== state.currentIndex || state.pausedUntil) saveState({ currentIndex: index });
       return result;
     } catch (err: unknown) {
       const isCreditsError =
@@ -141,12 +167,14 @@ export async function callTavily(params: TavilySearchParams): Promise<TavilyResp
       if (isCreditsError) {
         console.warn(`   ⚠️  Tavily key ${keyNum} exhausted — rotating to next key`);
         index = (index + 1) % keys.length;
-        saveState(index);
         attempts++;
 
         if (index === startIndex) {
+          saveState({ currentIndex: index, pausedUntil: Date.now() + PAUSE_MS });
+          console.warn(`   🚨 All ${keys.length} Tavily keys exhausted — pausing web-search lookups for ${PAUSE_MS / 3600000}h instead of retrying every call.`);
           throw new Error('All Tavily API keys have exhausted credits. Please top up or add more keys.');
         }
+        saveState({ currentIndex: index });
       } else {
         throw err;
       }

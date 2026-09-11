@@ -1,8 +1,9 @@
-import { chromium, BrowserContext, Page } from 'playwright';
+﻿import { chromium, BrowserContext, Page } from 'playwright';
 import { humanDelay } from '../stagehand.js';
 import path from 'path';
 import fs from 'fs';
 import 'dotenv/config';
+import { killChromeForProfile } from '../../utils/killChrome.js';
 
 const FACEBOOK_ACCOUNTS_FILE = '.accounts/facebook-accounts.json';
 
@@ -42,6 +43,7 @@ export async function loginToFacebook(options?: {
   password?: string;
   sessionDir?: string;
   nickname?: string;
+  manualLogin?: boolean;
 }): Promise<Page> {
   // Load by nickname if provided, otherwise first active account
   const account = options?.nickname
@@ -57,16 +59,16 @@ export async function loginToFacebook(options?: {
     throw new Error(`Chrome not found at ${chromePath}. Set CHROME_PATH env var.`);
   }
 
+  await killChromeForProfile(sessionDir);
+
   console.log('   Launching Facebook browser (real Chrome)...');
 
   browserContext = await chromium.launchPersistentContext(sessionDir, {
-    headless: false,
+    headless: true,
     executablePath: chromePath,
     slowMo: 50,
     ignoreDefaultArgs: ['--enable-automation'],
     args: [
-      '--no-sandbox',
-      '--start-maximized',
       '--disable-blink-features=AutomationControlled',
       '--disable-renderer-backgrounding',
       '--disable-background-timer-throttling',
@@ -88,11 +90,12 @@ export async function loginToFacebook(options?: {
 
   const page = await browserContext.newPage();
 
-  try {
-    const cdp = await browserContext.newCDPSession(page);
-    const { windowId } = await cdp.send('Browser.getWindowForTarget');
-    await cdp.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'minimized' } });
-  } catch { /* not critical */ }
+  // NOTE: previously minimized the window here via CDP right after launch.
+  // Chrome deprioritizes rendering/JS for minimized windows, which for a
+  // heavy client-rendered SPA like Facebook can mean composer buttons never
+  // actually finish rendering — every click then fails to find its target.
+  // Never minimize this window; that concern applies to headless too, but
+  // this account currently runs headless:true per explicit instruction.
 
   // Go directly to login page
   await page.goto('https://www.facebook.com/login', {
@@ -107,6 +110,26 @@ export async function loginToFacebook(options?: {
   const currentUrl = page.url();
   if (currentUrl.includes('/home') || currentUrl.includes('/feed')) {
     console.log('   Already logged in to Facebook!');
+    return page;
+  }
+
+  if (options?.manualLogin) {
+    // Manual mode — browser is open, user types credentials themselves
+    console.log('   ⌨️  Manual login mode — please log in with your credentials in the browser.');
+    console.log('   ✅ Waiting for you to log in... (watching for /home or /feed)');
+    // Wait until the user successfully logs in
+    while (true) {
+      await humanDelay(2000, 2000);
+      try {
+        const url = page.url();
+        if (url.includes('/home') || url.includes('/feed') || (!url.includes('/login') && !url.includes('facebook.com') === false && url.includes('facebook.com'))) {
+          console.log('   ✅ Login detected!');
+          break;
+        }
+      } catch {
+        break; // browser closed
+      }
+    }
     return page;
   }
 
@@ -141,9 +164,9 @@ export async function loginToFacebook(options?: {
 
   if (page.url().includes('/login')) {
     console.log('   ⚠️  Still on /login page — auto-login incomplete (CAPTCHA / wrong credentials?).');
-    // Do NOT close the browser here — let the caller decide (manual completion or skip)
   }
 
   console.log('✅ Facebook login done!');
   return page;
 }
+

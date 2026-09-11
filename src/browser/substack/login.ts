@@ -1,4 +1,4 @@
-import { chromium, BrowserContext, Page } from 'playwright';
+﻿import { chromium, BrowserContext, Page } from 'playwright';
 import path from 'path';
 import fs from 'fs';
 import 'dotenv/config';
@@ -63,20 +63,20 @@ export async function loginToSubstack(options?: {
 
   fs.mkdirSync(sessionDir, { recursive: true });
 
-  killChromeForProfile(sessionDir);
+  await killChromeForProfile(sessionDir);
 
   console.log(`   Using session folder: ${sessionDir}`);
   console.log('   Launching Substack browser...');
 
   browserContext = await chromium.launchPersistentContext(sessionDir, {
-    headless: false,
+    headless: true,
     executablePath: chromePath,
     viewport: { width: 1280, height: 720 },
     slowMo: 50,
     ignoreDefaultArgs: ['--enable-automation'],
     args: [
-      '--no-sandbox',
-      '--start-maximized',
+      '--start-minimized',
+      '--window-size=1280,720',
       '--disable-blink-features=AutomationControlled',
       '--disable-renderer-backgrounding',
       '--disable-background-timer-throttling',
@@ -97,7 +97,8 @@ export async function loginToSubstack(options?: {
     (globalThis as any).window.chrome = (globalThis as any).window.chrome || { runtime: {} };
   });
 
-  // Minimize window immediately so it doesn't disturb the screen
+  // Minimize window — wait for browser to fully init before CDP call
+  await sleep(600);
   try {
     const tmpPage = browserContext.pages()[0] || await browserContext.newPage();
     const cdp = await browserContext.newCDPSession(tmpPage);
@@ -240,3 +241,4 @@ async function main() {
 if (process.argv[1]?.includes('substack/login')) {
   main();
 }
+

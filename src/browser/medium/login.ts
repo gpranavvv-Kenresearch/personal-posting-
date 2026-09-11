@@ -1,7 +1,8 @@
-import { chromium, BrowserContext, Page } from 'playwright';
+﻿import { chromium, BrowserContext, Page } from 'playwright';
 import path from 'path';
 import fs from 'fs';
 import 'dotenv/config';
+import { killChromeForProfile } from '../../utils/killChrome.js';
 
 const MEDIUM_ACCOUNTS_FILE = '.accounts/accounts-medium.json';
 const SESSION_ROOT = path.resolve('.sessions/medium');
@@ -68,6 +69,7 @@ export async function loginToMedium(options?: {
   if (!fs.existsSync(sessionDir)) {
     fs.mkdirSync(sessionDir, { recursive: true });
   }
+  await killChromeForProfile(sessionDir);
 
   console.log(`   Using session folder: ${sessionDir}`);
   console.log('   Launching Medium browser...');
@@ -79,8 +81,7 @@ export async function loginToMedium(options?: {
     slowMo: 50,
     ignoreDefaultArgs: ['--enable-automation'],
     args: [
-      '--no-sandbox',
-      '--start-maximized',
+      '--start-minimized',
       '--disable-blink-features=AutomationControlled',
       '--disable-renderer-backgrounding',
       '--disable-background-timer-throttling',
@@ -132,17 +133,7 @@ export async function loginToMedium(options?: {
     // For now, just wait for manual login
   }
 
-  // If not logged in, wait 20 seconds for manual login
-  console.log(`   ⏳ Not logged in – waiting 20 seconds for manual login...`);
-  await sleep(20000);
-
-  // Check again
-  const finalCheck = !(await page.url()).includes('signin');
-  if (!finalCheck) {
-    await closeMediumBrowser();
-    throw new Error(`Unable to log in to Medium as ${email}. Session expired or login failed. Please log in manually or update session.`);
-  }
-
-  console.log(`   ✅ Login successful`);
-  return page;
+  await closeMediumBrowser();
+  throw new Error(`Unable to log in to Medium as ${email}. Session expired — run save-medium-session manually.`);
 }
+

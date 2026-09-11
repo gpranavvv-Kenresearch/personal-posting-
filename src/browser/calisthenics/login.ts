@@ -1,10 +1,11 @@
-/**
+﻿/**
  * Calisthenics login — persistent browser session (calisthenics.mn.co)
  */
 
 import { chromium, BrowserContext, Page } from 'playwright';
 import fs from 'fs';
 import path from 'path';
+import { killChromeForProfile } from '../../utils/killChrome.js';
 
 interface CalisthenicsAccount {
   username: string;
@@ -53,19 +54,19 @@ export async function loginCalisthenics(nickname: string, manualLogin = false): 
 
   const sessionDir = path.resolve(account.sessionDir);
   fs.mkdirSync(sessionDir, { recursive: true });
+  await killChromeForProfile(sessionDir);
 
   console.log(`   Using session folder: ${sessionDir}`);
   console.log('   Launching Calisthenics browser...');
 
   browserContext = await chromium.launchPersistentContext(sessionDir, {
-    headless: false,
+    headless: true,
     executablePath: CHROME_PATH,
     viewport: { width: 1366, height: 900 },
     slowMo: 50,
     ignoreDefaultArgs: ['--enable-automation'],
     args: [
-      '--no-sandbox',
-      '--start-maximized',
+      '--start-minimized',
       '--disable-blink-features=AutomationControlled',
       '--disable-renderer-backgrounding',
       '--disable-background-timer-throttling',
@@ -107,7 +108,8 @@ export async function loginCalisthenics(nickname: string, manualLogin = false): 
 
   console.log('   Navigating to Calisthenics...');
   await page.goto('https://calisthenics.mn.co/', { waitUntil: 'domcontentloaded', timeout: 30000 });
-  await sleep(3000);
+  // Wait for either the Create button (logged in) or sign-in link (not logged in)
+  await page.waitForSelector('a[title="Create"], a[href*="/sign_in"]', { timeout: 30000 }).catch(() => {});
 
   // Check if already logged in
   const loggedIn = !page.url().includes('/sign_in') && !page.url().includes('/login');
@@ -150,3 +152,4 @@ export async function loginCalisthenics(nickname: string, manualLogin = false): 
     }
   }
 }
+

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * index.ts — Entry Point
  *
  * NEW ARCHITECTURE: Cron-Driven Platform-Specific Batch Scheduling
@@ -7,7 +7,17 @@
  *   npm run dev                             → start cron scheduler daemon
  *   npm run dev -- run-x-batch              → run X batch once now
  *   npm run dev -- run-fb-batch             → run FB batch once now
+ *   npm run dev -- run-tumblr-batch         → run Tumblr batch once now
  *   npm run dev -- run-li-batch             → run LI batch once now
+ *   npm run dev -- run-group-batch <Group4|Group4b>
+ *                                            → claim rows from Content Pool + run Medium/Google Site once now
+ *   npm run dev -- run-blog-gen [count] [--no-image]
+ *                                            → generate up to [count] Content Pool rows that have a Target URL but
+ *                                              no Blog Content yet — blog + cover image by default (two parallel
+ *                                              Chrome windows), pass --no-image to skip the image step, then exit
+ *   npm run dev -- run-blog-gen-loop [count] [--no-image] [--interval SECONDS]
+ *                                            → same, but runs forever (default: every 1800s) — start this as its
+ *                                              own long-lived process, separate from the posting cron daemon
  *   npm run dev -- run-medium-batch         → run Medium batch once now
  *   npm run dev -- run-linkmate-batch       → run Linkmate batch once now
  *   npm run dev -- run-devto-batch          → run Dev.to batch once now
@@ -15,26 +25,53 @@
  *   npm run dev -- run-linkedin-pulse-batch → run LinkedIn Pulse batch once now
  *   npm run dev -- run-calisthenics-batch   → run Calisthenics batch once now
  *   npm run dev -- run-substack-batch       → run Substack batch once now
- *   npm run dev -- run-guffiz-batch         → run Guffiz batch once now
  *   npm run dev -- run-hackmd-batch         → run HackMD batch once now
  *   npm run dev -- save-medium-session <nickname> → login & save Medium cookies
  *   npm run dev -- save-linkmate-session <nickname> → login & save Linkmate cookies
  *   npm run dev -- save-googlesite-session <nickname> → login & save Google Sites session
  *   npm run dev -- save-calisthenics-session <nickname> → login & save Calisthenics session
  *   npm run dev -- save-substack-session <nickname> → login & save Substack session
- *   npm run dev -- save-guffiz-session <nickname> → login & save Guffiz session
- *   npm run dev -- save-hackmd-session <nickname> → login & save HackMD session
+ *   npm run dev -- save-hackmd-session <nickname>     → login & save HackMD session
+ *   npm run dev -- save-x-session <nickname>          → login & save X session
+ *   npm run dev -- save-fb-session <nickname>         → login & save Facebook session
+ *   npm run dev -- save-li-session <nickname>         → login & save LinkedIn session
+ *   npm run dev -- save-patreon-session <nickname>    → login & save Patreon session
+ *   npm run dev -- save-notion-session <nickname>     → login & save Notion session
+ *   npm run dev -- save-naver-session <nickname>      → login & save Naver session
+ *   npm run dev -- save-velog-session <nickname>      → login & save Velog session
+ *   npm run dev -- save-coda-session <nickname>       → login & save Coda session
+ *   npm run dev -- save-paragraph-session <nickname> → login & save Paragraph session
+ *   npm run dev -- run-paragraph-batch               → run Paragraph batch once now
+ *   npm run dev -- run-patreon-batch                  → run Patreon batch once now
+ *   npm run dev -- run-notion-batch                   → run Notion batch once now
+ *   npm run dev -- run-naver-batch                    → run Naver batch once now
+ *   npm run dev -- run-velog-batch                    → run Velog batch once now
+ *   npm run dev -- run-coda-batch                     → run Coda batch once now
  *   npm run dev -- tracker                  → daily posting tracker (posted/failed/pending per platform)
  *   npm run dev -- status                   → show current sheet stats
  *   npm run dev -- monitor                  → run one monitor cycle (for Claude CLI /loop)
  */
 
 import 'dotenv/config';
+import fs from 'fs';
 import { initErrorInterceptor } from './errorInterceptor.js';
 import { startCoordinatorDaemon } from './scheduler-new.js';
 
 // Patch console.error/warn to stream to logs/runtime.log for monitor
 initErrorInterceptor();
+
+// Catch uncaught crashes that would otherwise kill the process silently
+process.on('uncaughtException', (err) => {
+  const msg = `[FATAL uncaughtException] ${err.stack || err.message}`;
+  console.error(msg);
+  try { fs.appendFileSync('logs/runtime.log', JSON.stringify({ level: 'FATAL', ts: new Date().toISOString(), msg }) + '\n'); } catch {}
+  // Don't exit — keep the scheduler alive
+});
+process.on('unhandledRejection', (reason: any) => {
+  const msg = `[FATAL unhandledRejection] ${reason?.stack || reason}`;
+  console.error(msg);
+  try { fs.appendFileSync('logs/runtime.log', JSON.stringify({ level: 'FATAL', ts: new Date().toISOString(), msg }) + '\n'); } catch {}
+});
 
 const mode = process.argv[2];
 
@@ -64,11 +101,58 @@ async function main() {
     return;
   }
 
+  if (mode === 'run-tumblr-batch') {
+    console.log('▶ Running Tumblr batch now...\n');
+    const { runTumblrBatch } = await import('./coordinator/masterCoordinator.js');
+    await runTumblrBatch();
+    console.log('\n✅ Tumblr batch complete');
+    return;
+  }
+
   if (mode === 'run-li-batch') {
     console.log('▶ Running LI batch now...\n');
     const { runLiBatch } = await import('./coordinator/masterCoordinator.js');
     await runLiBatch({ manual: true }, 1);
     console.log('\n✅ LI batch complete');
+    return;
+  }
+
+  if (mode === 'run-group-batch') {
+    const groupName = process.argv[3];
+    if (!groupName) {
+      console.error('Usage: npm run dev -- run-group-batch <Group1|Group2|Group3|Group4|Group1b|Group2b|Group3b|Group4b>');
+      return;
+    }
+    const { runGroupBatch, GROUP_DEFS } = await import('./coordinator/masterCoordinator.js');
+    const def = GROUP_DEFS[groupName];
+    if (!def) {
+      console.error(`Unknown group "${groupName}". Valid: ${Object.keys(GROUP_DEFS).join(', ')}`);
+      return;
+    }
+    console.log(`▶ Running group batch "${groupName}" now...\n`);
+    await runGroupBatch(groupName, def.platforms, def.accountCount, def.batchNum);
+    console.log(`\n✅ Group batch "${groupName}" complete`);
+    return;
+  }
+
+  if (mode === 'run-blog-gen') {
+    const limit = Number(process.argv[3]) || 3;
+    const withImage = !process.argv.includes('--no-image'); // full generation (blog + image) is the default
+    console.log(`▶ Running one blog-gen pass (limit ${limit}, image: ${withImage})...\n`);
+    const { runBlogGenBatch } = await import('./coordinator/blogGenLoop.js');
+    const result = await runBlogGenBatch({ limit, withImage });
+    console.log(`\n✅ Blog-gen pass complete: ${result.generated}/${result.attempted} generated`);
+    return;
+  }
+
+  if (mode === 'run-blog-gen-loop') {
+    const limit = Number(process.argv[3]) || 3;
+    const withImage = !process.argv.includes('--no-image'); // full generation (blog + image) is the default
+    const intervalArgIdx = process.argv.indexOf('--interval');
+    const intervalSeconds = intervalArgIdx !== -1 ? Number(process.argv[intervalArgIdx + 1]) : undefined;
+    console.log(`▶ Starting continuous blog-gen loop (limit ${limit}/pass, image: ${withImage}, interval ${intervalSeconds ?? 1800}s)...\n`);
+    const { runBlogGenLoop } = await import('./coordinator/blogGenLoop.js');
+    await runBlogGenLoop({ limit, withImage, intervalSeconds }); // never returns — Ctrl+C to stop
     return;
   }
 
@@ -93,6 +177,29 @@ async function main() {
     const { runDevtoBatch } = await import('./coordinator/masterCoordinator.js');
     await runDevtoBatch();
     console.log('\n✅ Dev.to batch complete');
+    return;
+  }
+
+  if (mode === 'run-wordpress-batch') {
+    console.log('▶ Running WordPress batch now...\n');
+    const { runWordpressBatch } = await import('./coordinator/masterCoordinator.js');
+    await runWordpressBatch();
+    console.log('\n✅ WordPress batch complete');
+    return;
+  }
+
+  if (mode === 'run-blogger-batch') {
+    console.log('▶ Running Blogger batch now...\n');
+    const { runBloggerBatch } = await import('./coordinator/masterCoordinator.js');
+    await runBloggerBatch();
+    console.log('\n✅ Blogger batch complete');
+    return;
+  }
+
+  if (mode === 'run-note-batch') {
+    console.log('▶ Running Note batch now...\n');
+    const { runNoteBatch } = await import('./coordinator/masterCoordinator.js');
+    await runNoteBatch(1);
     return;
   }
 
@@ -128,19 +235,209 @@ async function main() {
     return;
   }
 
-  if (mode === 'run-guffiz-batch') {
-    console.log('▶ Running Guffiz batch now...\n');
-    const { runGuffizBatch } = await import('./coordinator/masterCoordinator.js');
-    await runGuffizBatch();
-    console.log('\n✅ Guffiz batch complete');
-    return;
-  }
-
   if (mode === 'run-hackmd-batch') {
     console.log('▶ Running HackMD batch now...\n');
     const { runHackmdBatch } = await import('./coordinator/masterCoordinator.js');
     await runHackmdBatch();
     console.log('\n✅ HackMD batch complete');
+    return;
+  }
+
+  if (mode === 'run-patreon-batch') {
+    console.log('▶ Running Patreon batch now...\n');
+    const { runPatreonBatch } = await import('./coordinator/masterCoordinator.js');
+    await runPatreonBatch();
+    console.log('\n✅ Patreon batch complete');
+    return;
+  }
+
+  if (mode === 'run-notion-batch') {
+    console.log('▶ Running Notion batch now...\n');
+    const { runNotionBatch } = await import('./coordinator/masterCoordinator.js');
+    await runNotionBatch();
+    console.log('\n✅ Notion batch complete');
+    return;
+  }
+
+  if (mode === 'run-naver-batch') {
+    console.log('▶ Running Naver batch now...\n');
+    const { runNaverBatch } = await import('./coordinator/masterCoordinator.js');
+    await runNaverBatch();
+    console.log('\n✅ Naver batch complete');
+    return;
+  }
+
+  if (mode === 'run-velog-batch') {
+    console.log('▶ Running Velog batch now...\n');
+    const { runVelogBatch } = await import('./coordinator/masterCoordinator.js');
+    await runVelogBatch();
+    console.log('\n✅ Velog batch complete');
+    return;
+  }
+
+  if (mode === 'run-coda-batch') {
+    console.log('▶ Running Coda batch now...\n');
+    const { runCodaBatch } = await import('./coordinator/masterCoordinator.js');
+    await runCodaBatch();
+    console.log('\n✅ Coda batch complete');
+    return;
+  }
+
+  if (mode === 'run-paragraph-batch') {
+    console.log('▶ Running Paragraph batch now...\n');
+    const { runParagraphBatch } = await import('./coordinator/masterCoordinator.js');
+    await runParagraphBatch();
+    console.log('\n✅ Paragraph batch complete');
+    return;
+  }
+
+  if (mode === 'run-ameba-batch') {
+    console.log('▶ Running Ameba batch now...\n');
+    const { runAmebaBatch } = await import('./coordinator/masterCoordinator.js');
+    await runAmebaBatch();
+    console.log('\n✅ Ameba batch complete');
+    return;
+  }
+
+  if (mode === 'save-x-session') {
+    const nickname = process.argv[3];
+    if (!nickname) {
+      console.error('❌ Usage: npm run dev -- save-x-session <nickname>');
+      process.exit(1);
+    }
+    const { getAccountByHandle } = await import('./config/accounts.js');
+    const { loginToX } = await import('./browser/twitter/login.js');
+    const account = getAccountByHandle(nickname);
+    if (!account) { console.error(`❌ No X account found for: ${nickname}`); process.exit(1); }
+    console.log(`\n🌐 Opening browser for X login — @${nickname}`);
+    await loginToX(account);
+    console.log('\n✅ X session saved. Press Ctrl+C to exit.');
+    await new Promise(() => {});
+    return;
+  }
+
+  if (mode === 'save-fb-session') {
+    const nickname = process.argv[3];
+    if (!nickname) {
+      console.error('❌ Usage: npm run dev -- save-fb-session <nickname>');
+      process.exit(1);
+    }
+    const { loginToFacebook } = await import('./browser/facebook/login.js');
+    console.log(`\n🌐 Opening browser for Facebook login — ${nickname}`);
+    await loginToFacebook({ nickname });
+    console.log('\n✅ Facebook session saved. Press Ctrl+C to exit.');
+    await new Promise(() => {});
+    return;
+  }
+
+  if (mode === 'save-fb-session-manual') {
+    const nickname = process.argv[3];
+    if (!nickname) {
+      console.error('❌ Usage: npm run dev -- save-fb-session-manual <nickname>');
+      process.exit(1);
+    }
+    const { loginToFacebook } = await import('./browser/facebook/login.js');
+    console.log(`\n🌐 Opening browser for MANUAL Facebook login — ${nickname}`);
+    console.log('   Browser will open at facebook.com/login — type your credentials yourself.');
+    await loginToFacebook({ nickname, manualLogin: true });
+    console.log('\n✅ Facebook session saved. Press Ctrl+C to exit.');
+    await new Promise(() => {});
+    return;
+  }
+
+  if (mode === 'save-li-session') {
+    const nickname = process.argv[3];
+    if (!nickname) {
+      console.error('❌ Usage: npm run dev -- save-li-session <nickname>');
+      process.exit(1);
+    }
+    const { loginToLinkedIn } = await import('./browser/linkedin/login.js');
+    console.log(`\n🌐 Opening browser for LinkedIn login — ${nickname}`);
+    await loginToLinkedIn({ nickname });
+    console.log('\n✅ LinkedIn session saved. Press Ctrl+C to exit.');
+    await new Promise(() => {});
+    return;
+  }
+
+  if (mode === 'save-patreon-session') {
+    const nickname = process.argv[3];
+    if (!nickname) {
+      console.error('❌ Usage: npm run dev -- save-patreon-session <nickname>');
+      process.exit(1);
+    }
+    const { loginToPatreon } = await import('./browser/patreon/login.js');
+    console.log(`\n🌐 Opening browser for Patreon login — ${nickname}`);
+    await loginToPatreon({ nickname });
+    console.log('\n✅ Patreon session saved. Press Ctrl+C to exit.');
+    await new Promise(() => {});
+    return;
+  }
+
+  if (mode === 'save-notion-session') {
+    const nickname = process.argv[3];
+    if (!nickname) {
+      console.error('❌ Usage: npm run dev -- save-notion-session <nickname>');
+      process.exit(1);
+    }
+    const { loginToNotion } = await import('./browser/notion/login.js');
+    console.log(`\n🌐 Opening browser for Notion login — ${nickname}`);
+    await loginToNotion({ nickname, headless: false });
+    console.log('\n✅ Notion session saved. Press Ctrl+C to exit.');
+    await new Promise(() => {});
+    return;
+  }
+
+  if (mode === 'save-naver-session') {
+    const nickname = process.argv[3];
+    if (!nickname) {
+      console.error('❌ Usage: npm run dev -- save-naver-session <nickname>');
+      process.exit(1);
+    }
+    const { loginToNaverInteractive } = await import('./browser/naver/login.js');
+    console.log(`\n🌐 Opening browser for Naver login — ${nickname}`);
+    await loginToNaverInteractive({ nickname });
+    console.log('\n✅ Naver session saved. Press Ctrl+C to exit.');
+    await new Promise(() => {});
+    return;
+  }
+
+  if (mode === 'save-velog-session') {
+    const nickname = process.argv[3];
+    if (!nickname) {
+      console.error('❌ Usage: npm run dev -- save-velog-session <nickname>');
+      process.exit(1);
+    }
+    const { loginToVelog } = await import('./browser/velog/login.js');
+    console.log(`\n🌐 Opening browser for Velog login — ${nickname}`);
+    await loginToVelog({ nickname });
+    console.log('\n✅ Velog session saved. Press Ctrl+C to exit.');
+    await new Promise(() => {});
+    return;
+  }
+
+  if (mode === 'save-coda-session') {
+    const nickname = process.argv[3];
+    if (!nickname) {
+      console.error('❌ Usage: npm run dev -- save-coda-session <nickname>');
+      process.exit(1);
+    }
+    const { loginToCoda } = await import('./browser/coda/login.js');
+    console.log(`\n🌐 Opening browser for Coda login — ${nickname}`);
+    await loginToCoda({ nickname });
+    console.log('\n✅ Coda session saved. Press Ctrl+C to exit.');
+    await new Promise(() => {});
+    return;
+  }
+
+  if (mode === 'save-note-session') {
+    const nickname = process.argv[3];
+    if (!nickname) {
+      console.error('❌ Usage: npm run dev -- save-note-session <nickname>');
+      console.error('   Example: npm run dev -- save-note-session aniket');
+      process.exit(1);
+    }
+    const { saveNoteSession } = await import('./coordinator/masterCoordinator.js');
+    await saveNoteSession(nickname);
     return;
   }
 
@@ -195,12 +492,12 @@ async function main() {
     console.log(`   Log in manually in the browser, then press Enter here to save & close.\n`);
 
     const ctx = await chromium.launchPersistentContext(sessionDir, {
-      headless: false,
+      headless: true,
       executablePath: fs.existsSync(chromePath) ? chromePath : undefined,
       channel: fs.existsSync(chromePath) ? undefined : 'chrome',
       viewport: { width: 1366, height: 900 },
       ignoreDefaultArgs: ['--enable-automation'],
-      args: ['--no-sandbox', '--disable-blink-features=AutomationControlled', '--no-first-run', '--disable-infobars'],
+      args: ['--disable-blink-features=AutomationControlled', '--no-first-run', '--disable-infobars'],
     });
 
     const pages = ctx.pages();
@@ -252,20 +549,20 @@ async function main() {
     }
     const path = await import('path');
     const { chromium } = await import('playwright');
-    const sessionDir = path.default.resolve(`.sessions/googlesite/${nickname}`);
+    const sessionDir = path.default.resolve(`.sessions/substack/${nickname}`);
     const chromePath = process.env.CHROME_PATH || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
     console.log(`\n🔐 Opening Substack browser for: ${nickname}`);
-    console.log(`   Session dir: ${sessionDir} (shared Google session)\n`);
+    console.log(`   Session dir: ${sessionDir}\n`);
     const fs = await import('fs');
     if (!fs.default.existsSync(sessionDir)) fs.default.mkdirSync(sessionDir, { recursive: true });
     const ctx = await chromium.launchPersistentContext(sessionDir, {
-      headless: false,
+      headless: true,
       executablePath: chromePath,
       viewport: { width: 1280, height: 720 },
       slowMo: 50,
       ignoreDefaultArgs: ['--enable-automation'],
       args: [
-        '--no-sandbox', '--start-maximized',
+        '--start-minimized',
         '--disable-blink-features=AutomationControlled',
         '--no-first-run', '--no-default-browser-check',
         '--disable-session-crashed-bubble', '--disable-infobars',
@@ -314,18 +611,6 @@ async function main() {
     return;
   }
 
-  if (mode === 'save-guffiz-session') {
-    const nickname = process.argv[3];
-    if (!nickname) {
-      console.error('❌ Usage: npm run dev -- save-guffiz-session <nickname>');
-      console.error('   Example: npm run dev -- save-guffiz-session pranav');
-      process.exit(1);
-    }
-    const { saveGuffizSession } = await import('./coordinator/masterCoordinator.js');
-    await saveGuffizSession(nickname);
-    return;
-  }
-
   if (mode === 'save-wordpress-session') {
     const nickname = process.argv[3];
     if (!nickname) {
@@ -335,21 +620,20 @@ async function main() {
     }
     const path = await import('path');
     const { chromium } = await import('playwright');
-    const sessionDir = path.default.resolve(`.sessions/googlesite/${nickname}`);
+    const sessionDir = path.default.resolve(`.sessions/wordpress/${nickname}`);
     const chromePath = process.env.CHROME_PATH || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
     console.log(`\n🔐 Opening WordPress browser for: ${nickname}`);
-    console.log(`   Session dir: ${sessionDir} (shared Google session)\n`);
+    console.log(`   Session dir: ${sessionDir}\n`);
     const fs = await import('fs');
     if (!fs.default.existsSync(sessionDir)) fs.default.mkdirSync(sessionDir, { recursive: true });
     const ctx = await chromium.launchPersistentContext(sessionDir, {
-      headless: false,
+      headless: true,
       executablePath: chromePath,
       viewport: { width: 1366, height: 900 },
       slowMo: 50,
       ignoreDefaultArgs: ['--enable-automation'],
       args: [
-        '--no-sandbox',
-        '--start-maximized',
+        '--start-minimized',
         '--disable-blink-features=AutomationControlled',
         '--no-first-run', '--no-default-browser-check',
         '--disable-session-crashed-bubble', '--disable-infobars',
@@ -391,10 +675,10 @@ async function main() {
     }
     const path = await import('path');
     const { chromium } = await import('playwright');
-    const sessionDir = path.default.resolve(`.sessions/googlesite/${nickname}`);
+    const sessionDir = path.default.resolve(`.sessions/blogger/${nickname}`);
     const chromePath = process.env.CHROME_PATH || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
     console.log(`\n🔐 Opening Blogger browser for: ${nickname}`);
-    console.log(`   Session dir: ${sessionDir} (shared Google session)\n`);
+    console.log(`   Session dir: ${sessionDir}\n`);
     const fs = await import('fs');
     if (!fs.default.existsSync(sessionDir)) fs.default.mkdirSync(sessionDir, { recursive: true });
     const ctx = await chromium.launchPersistentContext(sessionDir, {
@@ -404,8 +688,6 @@ async function main() {
       slowMo: 50,
       ignoreDefaultArgs: ['--enable-automation'],
       args: [
-        '--no-sandbox',
-        '--start-maximized',
         '--disable-blink-features=AutomationControlled',
         '--no-first-run', '--no-default-browser-check',
         '--disable-session-crashed-bubble', '--disable-infobars',
@@ -431,19 +713,19 @@ async function main() {
     return;
   }
 
-  if (mode === 'save-penzu-session') {
+  if (mode === 'save-ameba-session') {
     const nickname = process.argv[3];
     if (!nickname) {
-      console.error('❌ Usage: npm run dev -- save-penzu-session <nickname>');
-      console.error('   Example: npm run dev -- save-penzu-session pranav');
+      console.error('❌ Usage: npm run dev -- save-ameba-session <nickname>');
+      console.error('   Example: npm run dev -- save-ameba-session pranav');
       process.exit(1);
     }
     const path = await import('path');
     const { chromium } = await import('playwright');
-    const sessionDir = path.default.resolve(`.sessions/googlesite/${nickname}`);
+    const sessionDir = path.default.resolve(`.sessions/ameba/${nickname}`);
     const chromePath = process.env.CHROME_PATH || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
-    console.log(`\n🔐 Opening Penzu browser for: ${nickname}`);
-    console.log(`   Session dir: ${sessionDir} (shared Google session)\n`);
+    console.log(`\n🔐 Opening Ameba browser for: ${nickname}`);
+    console.log(`   Session dir: ${sessionDir}\n`);
     const fs = await import('fs');
     if (!fs.default.existsSync(sessionDir)) fs.default.mkdirSync(sessionDir, { recursive: true });
     const ctx = await chromium.launchPersistentContext(sessionDir, {
@@ -453,12 +735,11 @@ async function main() {
       slowMo: 50,
       ignoreDefaultArgs: ['--enable-automation'],
       args: [
-        '--no-sandbox', '--start-maximized',
         '--disable-blink-features=AutomationControlled',
         '--no-first-run', '--no-default-browser-check',
         '--disable-session-crashed-bubble', '--disable-infobars',
       ],
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36',
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     });
     await ctx.grantPermissions(['clipboard-read', 'clipboard-write']);
     await ctx.addInitScript(() => {
@@ -467,52 +748,49 @@ async function main() {
     });
     const pages = ctx.pages();
     const pg = pages[0] || await ctx.newPage();
-    await pg.goto('https://penzu.com/', { waitUntil: 'domcontentloaded', timeout: 30000 });
-    process.stdout.write('\n✅ Browser open. Log in to Penzu (use Continue with Google), then type y and press Enter: ');
+    await pg.goto('https://www.ameba.jp/home', { waitUntil: 'domcontentloaded', timeout: 30000 });
+    process.stdout.write('\n✅ Browser open. Log in to Ameba, then type y and press Enter: ');
     await new Promise<void>(resolve => {
       process.stdin.resume();
       process.stdin.setEncoding('utf8');
       process.stdin.once('data', () => { process.stdin.pause(); resolve(); });
     });
-    console.log('\n   Saving session & closing browser...');
-    await ctx.close();
     console.log(`\n✅ Session saved for ${nickname}! (${sessionDir})`);
+    await ctx.close();
     return;
   }
 
-  if (mode === 'save-writeupcafe-session') {
+  if (mode === 'save-paragraph-session') {
     const nickname = process.argv[3];
     if (!nickname) {
-      console.error('❌ Usage: npm run dev -- save-writeupcafe-session <nickname>');
-      console.error('   Example: npm run dev -- save-writeupcafe-session pranav');
+      console.error('❌ Usage: npm run dev -- save-paragraph-session <nickname>');
+      console.error('   Example: npm run dev -- save-paragraph-session pranav');
       process.exit(1);
     }
     const path = await import('path');
     const { spawn } = await import('child_process');
-    const sessionDir = path.default.resolve(`.sessions/writeupcafe/${nickname}`);
-    const chromePath = process.env.CHROME_PATH || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
-    console.log(`\n🔐 Opening WriteupCafe browser for: ${nickname}`);
-    console.log(`   Session dir: ${sessionDir}\n`);
     const fs = await import('fs');
+    const sessionDir = path.default.resolve(`.sessions/paragraph/${nickname}`);
+    const chromePath = process.env.CHROME_PATH || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+    console.log(`\n🔐 Opening Paragraph in normal Chrome (no automation) for: ${nickname}`);
+    console.log(`   Session dir: ${sessionDir}\n`);
     if (!fs.default.existsSync(sessionDir)) fs.default.mkdirSync(sessionDir, { recursive: true });
-    const chrome = spawn(chromePath, [
+    // Plain Chrome — no Playwright, no automation flags → bypasses captcha detection
+    const proc = spawn(chromePath, [
       `--user-data-dir=${sessionDir}`,
-      '--start-maximized',
-      'https://writeupcafe.com/',
-    ], { detached: false, stdio: 'ignore' });
-    process.stdout.write('\n✅ Browser open. Log in to WriteupCafe, then type y and press Enter: ');
+      '--no-first-run',
+      '--no-default-browser-check',
+      'https://paragraph.com/home',
+    ], { detached: true, stdio: 'ignore' });
+    proc.unref();
+    process.stdout.write('\n✅ Normal Chrome open. Log in to Paragraph, then type y and press Enter: ');
     await new Promise<void>(resolve => {
       process.stdin.resume();
       process.stdin.setEncoding('utf8');
       process.stdin.once('data', () => { process.stdin.pause(); resolve(); });
     });
-    // Kill Chrome by PID so it flushes session to disk and releases profile lock
-    console.log('   Closing Chrome to save session...');
-    if (chrome.pid) {
-      spawn('taskkill', ['/PID', String(chrome.pid), '/T'], { stdio: 'ignore' });
-    }
-    await new Promise(r => setTimeout(r, 3000));
     console.log(`\n✅ Session saved for ${nickname}! (${sessionDir})`);
+    console.log('   Close Chrome manually if still open.');
     return;
   }
 
@@ -528,7 +806,7 @@ async function main() {
     return;
   }
 
-  if (mode === 'save-x-session') {
+  if (mode === 'login' || mode === 'save-x-session') {
     const nickname = process.argv[3];
     if (!nickname) {
       console.error('❌ Usage: npm run dev -- save-x-session <nickname>');
@@ -536,37 +814,33 @@ async function main() {
       process.exit(1);
     }
     const { getAccountByHandle } = await import('./config/accounts.js');
-    const { chromium } = await import('playwright');
+    const { spawn } = await import('child_process');
+    const path = await import('path');
+    const fs = await import('fs');
     const account = getAccountByHandle(nickname);
     if (!account) {
       console.error(`❌ Account "${nickname}" not found in accounts.json`);
       process.exit(1);
     }
-    const path = await import('path');
     const sessionDir = path.default.resolve(account.sessionDir || `.sessions/chrome-${account.handle}`);
-    console.log(`\n🔐 Opening X browser for: @${account.handle} (${nickname})`);
-    console.log(`   Session dir: ${sessionDir}\n`);
-    const ctx = await chromium.launchPersistentContext(sessionDir, {
-      headless: false,
-      channel: 'chrome',
-      slowMo: 50,
-      ignoreDefaultArgs: ['--enable-automation', '--no-sandbox'],
-      viewport: { width: 1280, height: 900 },
-    });
-    await ctx.grantPermissions(['clipboard-read', 'clipboard-write']);
-    const pages = ctx.pages();
-    const pg = pages[0] || await ctx.newPage();
-    await pg.goto('https://x.com/home', { waitUntil: 'domcontentloaded', timeout: 30000 });
-
-    // Ask user to confirm login
-    process.stdout.write('\n✅ Browser open. Log in to X if needed, then type y and press Enter: ');
+    fs.default.mkdirSync(sessionDir, { recursive: true });
+    const chromePath = process.env.CHROME_PATH || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+    console.log(`\n🔐 Opening plain Chrome for: @${account.handle} (${nickname})`);
+    console.log(`   Session dir: ${sessionDir}`);
+    console.log(`   → Log in to X manually, then come back here and press Enter.\n`);
+    const chrome = spawn(chromePath, [
+      `--user-data-dir=${sessionDir}`,
+      '--new-window',
+      'https://x.com/login',
+    ], { detached: true, stdio: 'ignore' });
+    chrome.unref();
+    process.stdout.write('✅ Browser open. Login complete? Press Enter to finish: ');
     await new Promise<void>(resolve => {
       process.stdin.resume();
       process.stdin.setEncoding('utf8');
       process.stdin.once('data', () => { process.stdin.pause(); resolve(); });
     });
     console.log(`\n✅ Session saved for ${nickname}!`);
-    await ctx.close();
     return;
   }
 
@@ -575,6 +849,32 @@ async function main() {
     const { runTracker, printTrackerReport } = await import('./tracker.js');
     const result = await runTracker();
     printTrackerReport(result);
+    return;
+  }
+
+  if (mode === 'today') {
+    const { runTracker, printTodaySummary, postTodaySummaryToTeams } = await import('./tracker.js');
+    const result = await runTracker();
+    printTodaySummary(result);
+
+    if (process.argv.includes('--no-teams')) return;
+
+    const autoSend = process.argv.includes('--send');
+    if (autoSend) {
+      await postTodaySummaryToTeams(result);
+      return;
+    }
+
+    const readline = await import('readline');
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    const answer = await new Promise<string>(resolve =>
+      rl.question('\nSend this summary to Teams? (y/N): ', a => { rl.close(); resolve(a); })
+    );
+    if (answer.trim().toLowerCase() === 'y' || answer.trim().toLowerCase() === 'yes') {
+      await postTodaySummaryToTeams(result);
+    } else {
+      console.log('Skipped Teams post.');
+    }
     return;
   }
 
@@ -607,7 +907,7 @@ async function main() {
     if (!rowArg || !platformArg) {
       console.error('❌ Usage: npm run dev -- row <rowNumber> <platform>');
       console.error('   Example: npm run dev -- row 15 googlesite');
-      console.error('   Platforms: googlesite, hackmd, devto, medium, linkmate, linkedin-pulse, calisthenics, substack, guffiz, wordpress');
+      console.error('   Platforms: googlesite, hackmd, devto, medium, linkmate, linkedin-pulse, calisthenics, substack, wordpress, naver');
       process.exit(1);
     }
     const rowIndex = parseInt(rowArg, 10);
@@ -630,7 +930,7 @@ async function main() {
     if (!fromArg || !toArg || !platformArg) {
       console.error('❌ Usage: npm run dev -- rows <fromRow> <toRow> <platform>');
       console.error('   Example: npm run dev -- rows 10 20 x');
-      console.error('   Platforms: googlesite, hackmd, devto, medium, linkmate, linkedin-pulse, calisthenics, substack, guffiz, wordpress, blogger, penzu, writeupcafe, x, facebook, linkedin');
+      console.error('   Platforms: googlesite, hackmd, devto, medium, linkmate, linkedin-pulse, calisthenics, substack, wordpress, blogger, x, facebook, linkedin');
       process.exit(1);
     }
 
@@ -654,6 +954,11 @@ async function main() {
   // Default: start cron scheduler daemon
   await startCoordinatorDaemon();
 
+  // RSS feed of recently-published reports, for faster search-engine
+  // discovery — see src/rss/server.ts.
+  const { startRssServer } = await import('./rss/server.js');
+  startRssServer();
+
   // Keep the process alive for cron jobs to fire
   await new Promise(() => {});
 }
@@ -663,3 +968,4 @@ main().catch(err => {
   console.error(err);
   process.exit(1);
 });
+

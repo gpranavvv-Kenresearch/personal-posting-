@@ -12,3 +12,10 @@ debug/
 logs/.monitor-state.json
 logs/error-kb.json
 logs/human-alerts.json
+logs/*.log.bak
+
+.generated/
+generated_images/
+outputs/
+debug-scratch/
+Untitled

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * loginX.ts — Standalone X login + session saver
  *
  * Usage:
@@ -69,6 +69,18 @@ async function reactType(page: Page, selector: string, text: string): Promise<vo
 }
 
 /**
+ * Paste text via the clipboard instead of typing character-by-character —
+ * no locator wait first, just click wherever the page currently has focus
+ * (X auto-focuses the username field on /flow/login) and paste directly.
+ */
+async function pasteText(page: Page, text: string): Promise<void> {
+  await page.evaluate(async (t) => {
+    await navigator.clipboard.writeText(t);
+  }, text);
+  await page.keyboard.press('Control+V');
+}
+
+/**
  * Click the visible "Next" / submit button on the current X login step.
  * Returns true if clicked, false if not found (caller should fallback to Enter).
  */
@@ -91,26 +103,6 @@ async function clickNext(page: Page): Promise<boolean> {
   return false;
 }
 
-/**
- * Wait until the current input field (username) disappears, signalling X
- * moved to the next step.  Falls back to a simple delay if it never disappears.
- */
-async function waitForStepAdvance(page: Page, currentInputSel: string): Promise<void> {
-  try {
-    await page.waitForFunction(
-      (sel) => {
-        const el = document.querySelector(sel);
-        return !el || (el as HTMLElement).offsetParent === null;
-      },
-      currentInputSel,
-      { timeout: 8000 }
-    );
-  } catch {
-    // X didn't hide the field — give it extra time anyway
-    await humanDelay(2500, 3500);
-  }
-}
-
 async function saveDebug(page: Page, handle: string, step: string): Promise<void> {
   const dir = path.resolve('debug', `x-login-${handle}`);
   fs.mkdirSync(dir, { recursive: true });
@@ -128,93 +120,33 @@ async function loginFlow(page: Page, account: XAccount): Promise<void> {
   await page.goto('https://x.com/i/flow/login', { waitUntil: 'domcontentloaded', timeout: 60000 });
   await humanDelay(2500, 3500);
 
-  // ── Step 1: username ───────────────────────────────────────────────────
-  const usernameSel = 'input[name="text"], input[autocomplete="username"]';
-  console.log('   Typing username...');
-  await reactType(page, usernameSel, username);
+  // ── Step 1: username — no locator wait, just paste into whatever's focused ──
+  console.log('   Pasting username...');
+  await pasteText(page, username);
+  await humanDelay(400, 600);
 
-  console.log('   Clicking Next...');
-  const clicked = await clickNext(page);
-  if (!clicked) {
-    console.log('   Next button not found — pressing Enter');
+  console.log('   Pressing Enter...');
+  await page.keyboard.press('Enter');
+
+  await humanDelay(2000, 3000);
+
+  // ── Step 2: optional security / identity verification — only if X shows it ──
+  const secSel = 'input[data-testid="ocfEnterTextTextInput"]';
+  if (await page.locator(secSel).first().isVisible({ timeout: 2000 }).catch(() => false)) {
+    console.log('   Security check — pasting handle...');
+    await pasteText(page, handle);
+    await humanDelay(400, 600);
     await page.keyboard.press('Enter');
+    await humanDelay(2000, 3000);
   }
 
-  // Wait for X to advance past the username screen
-  await waitForStepAdvance(page, 'input[name="text"]');
-  console.log(`   URL after username: ${page.url()}`);
-  await saveDebug(page, handle, '01-after-username');
+  // ── Step 3: password — no locator wait, just paste ──────────────────────
+  console.log('   Pasting password...');
+  await pasteText(page, password);
+  await humanDelay(400, 600);
 
-  // Detect if stuck on username screen again
-  const usernameStillVisible = await page.locator('input[name="text"]').first()
-    .isVisible({ timeout: 1500 }).catch(() => false);
-  const passwordVisible = await page.locator('input[name="password"]').first()
-    .isVisible({ timeout: 1500 }).catch(() => false);
-  const securityVisible = await page.locator('input[data-testid="ocfEnterTextTextInput"]').first()
-    .isVisible({ timeout: 1500 }).catch(() => false);
-
-  if (usernameStillVisible && !passwordVisible && !securityVisible) {
-    await saveDebug(page, handle, '01-username-stuck');
-    throw new Error(
-      `X_USERNAME_STUCK: X did not advance past the username screen for @${handle}.\n` +
-      `This usually means X is blocking automation. Try logging in manually once:\n` +
-      `  Open Chrome → navigate to x.com → log in → close Chrome\n` +
-      `  Session dir: ${sessionDir(handle)}`
-    );
-  }
-
-  // ── Step 2: optional security / identity verification ─────────────────
-  if (securityVisible || (!passwordVisible && !usernameStillVisible)) {
-    const secSel = 'input[data-testid="ocfEnterTextTextInput"]';
-    const secInput = page.locator(secSel).first();
-    if (await secInput.isVisible({ timeout: 5000 }).catch(() => false)) {
-      console.log('   Security check — entering handle...');
-      await reactType(page, secSel, handle);
-      const secClicked = await clickNext(page);
-      if (!secClicked) await page.keyboard.press('Enter');
-      await waitForStepAdvance(page, secSel);
-      await saveDebug(page, handle, '02-after-security');
-    }
-  }
-
-  // ── Step 3: password ───────────────────────────────────────────────────
-  const passSel = 'input[name="password"]';
-  const passInput = page.locator(passSel).first();
-
-  if (!await passInput.isVisible({ timeout: 10000 }).catch(() => false)) {
-    // One more security/verification step possible
-    const verSel = 'input[data-testid="ocfEnterTextTextInput"]';
-    if (await page.locator(verSel).first().isVisible({ timeout: 4000 }).catch(() => false)) {
-      console.log('   Extra verification step...');
-      await reactType(page, verSel, handle);
-      const vClicked = await clickNext(page);
-      if (!vClicked) await page.keyboard.press('Enter');
-      await humanDelay(2000, 3000);
-    }
-  }
-
-  console.log('   Typing password...');
-  await reactType(page, passSel, password);
-
-  // Click "Log in" button
-  const loginCandidates = [
-    '[data-testid="LoginForm_Login_Button"]',
-    'div[role="button"]:has-text("Log in")',
-    'button:has-text("Log in")',
-  ];
-  let logInClicked = false;
-  for (const sel of loginCandidates) {
-    const btn = page.locator(sel).first();
-    if (await btn.isVisible({ timeout: 1000 }).catch(() => false)) {
-      await btn.click();
-      logInClicked = true;
-      break;
-    }
-  }
-  if (!logInClicked) {
-    console.log('   Log in button not found — pressing Enter');
-    await page.keyboard.press('Enter');
-  }
+  console.log('   Pressing Enter...');
+  await page.keyboard.press('Enter');
 
   await humanDelay(3500, 5000);
   await saveDebug(page, handle, '03-after-login-click');
@@ -324,7 +256,7 @@ async function main(): Promise<void> {
       viewport: { width: 1280, height: 900 },
       ignoreDefaultArgs: ['--enable-automation'],
       args: [
-        '--no-sandbox',
+        '--start-minimized',
         '--disable-blink-features=AutomationControlled',
         '--disable-renderer-backgrounding',
         '--disable-background-timer-throttling',
@@ -379,3 +311,4 @@ async function main(): Promise<void> {
 }
 
 main();
+

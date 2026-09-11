@@ -3,6 +3,23 @@ import * as cheerio from 'cheerio';
 import { injectUTM, UTM_PARAMS } from '../../utils/utm.js';
 
 const SMALL_DELAY = 800;
+const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+
+async function gotoWithRetry(page: Page, url: string, expectedDomain: string, retries = 3): Promise<void> {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    } catch { /* timeout — check URL anyway */ }
+    const landed = page.url();
+    if (landed !== 'about:blank' && landed !== '' && landed.includes(expectedDomain)) return;
+    console.log(`   ⚠️ Navigation to ${url} landed on "${landed}" (attempt ${attempt}/${retries}) — retrying...`);
+    await sleep(3000);
+  }
+  const final = page.url();
+  if (final === 'about:blank' || final === '' || !final.includes(expectedDomain)) {
+    throw new Error(`Failed to navigate to ${url} after ${retries} attempts. Landed on: ${final}`);
+  }
+}
 
 /**
  * Post to Google Sites (expects logged-in page)
@@ -27,7 +44,7 @@ export async function postToGoogleSite(
   htmlContent = injectUTM(htmlContent, UTM_PARAMS.GoogleSite);
 
   console.log('   Navigating to Google Sites...');
-  await page.goto('https://sites.google.com/', { waitUntil: 'domcontentloaded', timeout: 30000 });
+  await gotoWithRetry(page, 'https://sites.google.com/', 'sites.google.com');
 
   // Inject UTM parameters into HTML links if provided
   let contentWithUtm = htmlContent;

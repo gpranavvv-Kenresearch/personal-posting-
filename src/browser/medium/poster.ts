@@ -157,7 +157,7 @@ export async function postToMedium(
     postUrl = await page.evaluate(() => navigator.clipboard.readText());
   } catch {
     try {
-      postUrl = execSync('powershell -command Get-Clipboard').toString().trim();
+      postUrl = execSync('powershell -command Get-Clipboard', { timeout: 5000 }).toString().trim();
     } catch {
       postUrl = page.url();
     }

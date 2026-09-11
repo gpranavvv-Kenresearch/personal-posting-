@@ -5,7 +5,7 @@
  * Persists to .sessions/daily-counts.json — auto-resets when date changes.
  *
  * Per-account daily limits:
- *   X         : 12 posts/day
+ *   X         : 2 posts/day
  *   Facebook  : 4  posts/day
  *   LinkedIn  : 3  posts/day
  */
@@ -18,7 +18,7 @@ import { getLinkedInAccounts } from '../browser/linkedin/login.js';
 const COUNTS_FILE = path.resolve('.sessions/daily-counts.json');
 
 const LIMITS = {
-  x:        14,   // 13-14 posts/day per X account (15 accounts × 14 = 210 X posts/day)
+  x:         2,   // 2 posts/day per X account (15 accounts × 2 = 30 X posts/day)
   facebook:  5,   // 4-5 posts/day per FB account  (15 accounts × 5  = 75 FB posts/day)
   linkedin:  3,   // 3 posts/day per LI account     (15 accounts × 3  = 45 LI posts/day)
 };

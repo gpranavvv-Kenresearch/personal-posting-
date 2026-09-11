@@ -4,34 +4,11 @@ import { injectUTM, UTM_PARAMS } from '../../utils/utm.js';
 const CLICK_DELAY = 2000;
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
-async function jsClickAnyFrame(page: Page, selector: string): Promise<void> {
-  for (const frame of page.frames()) {
-    try {
-      const found = await frame.evaluate((sel) => {
-        const el = document.querySelector(sel) as HTMLElement;
-        if (el) {
-          el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
-          el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
-          el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-          return true;
-        }
-        return false;
-      }, selector);
-      if (found) return;
-    } catch { continue; }
-  }
-}
-
-function extractFirstImageUrl(html: string): string | null {
-  const match = html.match(/<img[^>]+src="([^"]+)"/i);
-  return match ? match[1] : null;
-}
-
 export async function postToBlogger(
   page: Page,
   title: string,
   htmlContent: string,
-  nickname?: string,
+  _nickname?: string,
 ): Promise<{ success: true; postUrl: string; postText: string; postedAt: Date }> {
   // Position window top-left
   try {
@@ -48,76 +25,120 @@ export async function postToBlogger(
   await page.goto('https://www.blogger.com/', { waitUntil: 'domcontentloaded', timeout: 30000 });
   await sleep(CLICK_DELAY);
 
-  // Step 2: Click "Create New Post"
+  // Step 2: Click "Create new post" — retry until URL contains post/edit
   console.log('   Clicking New Post...');
-  await jsClickAnyFrame(page, '[aria-label="Create New Post"]');
-  console.log('   ✅ Clicked New Post — waiting 8 seconds for editor...');
-  await sleep(8000);
+  const MAX_TRIES = 5;
+  let editorOpen = false;
+  for (let attempt = 1; attempt <= MAX_TRIES; attempt++) {
+    await sleep(CLICK_DELAY);
+    if (attempt === 1) {
+      const btns = await page.evaluate(() =>
+        Array.from(document.querySelectorAll('[role="button"],[role="link"],a,button')).map(el => ({
+          tag: (el as HTMLElement).tagName,
+          aria: el.getAttribute('aria-label') || '',
+          text: ((el as HTMLElement).textContent || '').trim().slice(0, 40),
+        })).filter(b => b.aria || b.text)
+      );
+      console.log('   [DEBUG] clickable elements:');
+      for (const b of btns.slice(0, 20)) console.log(`     ${b.tag} aria="${b.aria}" text="${b.text}"`);
+    }
+    try {
+      await page.getByRole('button', { name: 'Create new post' }).click();
+    } catch { /* try other selectors */ }
+    try {
+      await page.waitForURL(/\/(post\/edit|post\/create|post\/g)/, { timeout: 8000 });
+      editorOpen = true;
+      console.log(`   ✅ Editor opened on try ${attempt}: ${page.url()}`);
+      break;
+    } catch {
+      console.log(`   ⚠️ Still on ${page.url()} — retrying (${attempt}/${MAX_TRIES})`);
+    }
+  }
+  if (!editorOpen) throw new Error(`Failed to open Blogger editor after ${MAX_TRIES} tries`);
+  console.log('   ⏳ Waiting 6 seconds for editor to load...');
+  await sleep(6000);
 
-  // Step 3: Click title field and type
+  // Step 3: Switch to HTML view
+  console.log('   Switching to HTML view...');
+  await page.getByRole('listbox', { name: 'Toggle view' }).click();
+  await sleep(1500);
+  await page.getByRole('option', { name: 'HTML view' }).click();
+  console.log('   ✅ HTML view selected');
+  await sleep(1500);
+
+  // Step 4: Type title
   console.log('   Typing title...');
-  await sleep(CLICK_DELAY);
-  await page.click('input[aria-label="Title"]', { force: true }).catch(() => {});
-  await sleep(CLICK_DELAY);
+  await page.click('input[aria-label="Title"]', { force: true });
+  await sleep(500);
   await page.keyboard.press('Control+A');
   await page.keyboard.press('Backspace');
   await page.keyboard.type(String(title).trim(), { delay: 50 });
   console.log('   ✅ Title typed');
 
-  // Step 4: Write HTML to clipboard and paste into CodeMirror
-  console.log('   Writing HTML to clipboard...');
-  await page.evaluate((html) => navigator.clipboard.writeText(html), htmlContent);
-  await sleep(CLICK_DELAY);
-  await page.click('.CodeMirror.cm-s-default', { force: true }).catch(() => {});
-  await sleep(CLICK_DELAY);
-  await page.keyboard.press('Control+V');
-  console.log('   ✅ HTML content pasted');
-
-  // Step 5: Insert image via URL
-  const imageUrl = extractFirstImageUrl(htmlContent);
-  if (imageUrl) {
-    console.log(`   Inserting image: ${imageUrl}`);
-
-    await sleep(CLICK_DELAY);
-    await jsClickAnyFrame(page, '[jsname="ksKsZd"]');
-    console.log('   ✅ Clicked Insert image — waiting 5 seconds to check dropdown...');
-    console.log('   ✅ Clicked Insert image — waiting 5 seconds to check dropdown...');
-    await sleep(5000);
-
-    await jsClickAnyFrame(page, '[aria-label="By URL"]');
-    console.log('   ✅ Clicked By URL');
-
-    await sleep(CLICK_DELAY);
-    await jsClickAnyFrame(page, '[jsname="vhZMvf"]');
-    await sleep(CLICK_DELAY);
-    await page.keyboard.type(imageUrl, { delay: 30 });
-    console.log('   ✅ Image URL typed');
-
-    await sleep(CLICK_DELAY);
-    await jsClickAnyFrame(page, '[jsname="Slj9he"]');
-    console.log('   ✅ Image inserted — waiting 3 seconds...');
-    await sleep(3000);
-  } else {
-    console.log('   ⚠️ No image found in content — skipping image insert');
+  // Step 5: Set HTML content directly into CodeMirror (images embedded in HTML)
+  console.log('   Setting HTML content in CodeMirror...');
+  const cmSet = await page.evaluate((html) => {
+    const cm = (document.querySelector('.CodeMirror') as any)?.CodeMirror;
+    if (cm) { cm.setValue(html); cm.focus(); return true; }
+    return false;
+  }, htmlContent);
+  if (!cmSet) {
+    console.warn('   ⚠️ CodeMirror not found — clipboard paste fallback');
+    await page.evaluate((html) => navigator.clipboard.writeText(html), htmlContent);
+    await page.click('.CodeMirror', { force: true }).catch(() => {});
+    await sleep(500);
+    await page.keyboard.press('Control+A');
+    await page.keyboard.press('Backspace');
+    await sleep(300);
+    await page.keyboard.press('Control+V');
   }
-
-  // Step 6: Click Publish button
-  console.log('   Clicking Publish...');
+  console.log('   ✅ HTML content set');
   await sleep(CLICK_DELAY);
-  await jsClickAnyFrame(page, '[jsname="vdQQuc"]');
-  console.log('   ✅ Clicked Publish — waiting 3 seconds...');
+
+  // Step 6: Click Publish button (class O0WRkf = editor primary, not post-list)
+  console.log('   Clicking Publish...');
+  await page.keyboard.press('Escape').catch(() => {});
+  await sleep(500);
+  const pub1 = await page.evaluate(() => {
+    const all = document.querySelectorAll('[aria-label="Publish"]');
+    for (const el of Array.from(all)) {
+      if ((el as HTMLElement).classList.contains('O0WRkf')) {
+        (el as HTMLElement).click();
+        return true;
+      }
+    }
+    return false;
+  });
+  if (!pub1) throw new Error('Publish button not found');
+  console.log('   ✅ Clicked Publish');
   await sleep(3000);
 
-  // Step 7: Click confirm Publish
+  // Step 7: Confirm publish in alertdialog
   console.log('   Confirming publish...');
-  await sleep(CLICK_DELAY);
-  await jsClickAnyFrame(page, '[jsname="LgbsSe"][data-id="EBS5u"]');
-  console.log('   ✅ Confirmed — waiting 5 seconds...');
-  await sleep(5000);
+  try {
+    await page.getByRole('button', { name: 'Confirm' }).click({ timeout: 15000 });
+    console.log('   ✅ Confirmed publish');
+  } catch {
+    throw new Error('Confirm Publish button not found');
+  }
+  await sleep(6000);
 
-  // Step 8: Get post URL
-  const postUrl = page.url();
-  console.log(`   ✅ Published. URL: ${postUrl}`);
+  // Step 8: Wait for posts list and read View link href
+  console.log('   Reading post URL from posts list...');
+  let postUrl = '';
+  try {
+    await page.waitForURL(/\/blog\/posts\//, { timeout: 15000 });
+    await sleep(2000);
+    postUrl = await page.evaluate(() => {
+      const el = document.querySelector('a[aria-label="View"].FKF6mc') as HTMLAnchorElement | null;
+      return el ? el.getAttribute('href') || '' : '';
+    });
+    console.log(`   ✅ Post URL: ${postUrl}`);
+  } catch {
+    postUrl = page.url();
+    console.warn(`   ⚠️ Could not read View href, using page URL: ${postUrl}`);
+  }
+  if (!postUrl) postUrl = page.url();
 
   return {
     success: true,

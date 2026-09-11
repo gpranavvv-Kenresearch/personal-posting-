@@ -1,7 +1,8 @@
-import { chromium, BrowserContext, Page } from 'playwright';
+﻿import { chromium, BrowserContext, Page } from 'playwright';
 import path from 'path';
 import fs from 'fs';
 import 'dotenv/config';
+import { killChromeForProfile } from '../../utils/killChrome.js';
 
 const DEVTO_ACCOUNTS_FILE = '.accounts/accounts-devto.json';
 
@@ -141,18 +142,19 @@ export async function loginToDevto(options?: {
 
   // Create session dir if it doesn't exist yet (fresh account)
   fs.mkdirSync(sessionDir, { recursive: true });
+  await killChromeForProfile(sessionDir);
 
   console.log(`   Dev.to session: ${sessionDir} (${account.email})`);
 
   browserContext = await chromium.launchPersistentContext(sessionDir, {
-    headless: false,
+    headless: true,
     executablePath: fs.existsSync(chromePath) ? chromePath : undefined,
     channel: fs.existsSync(chromePath) ? undefined : 'chrome',
     viewport: { width: 1366, height: 900 },
     slowMo: 50,
     ignoreDefaultArgs: ['--enable-automation'],
     args: [
-      '--no-sandbox',
+      '--start-minimized',
       '--disable-blink-features=AutomationControlled',
       '--disable-renderer-backgrounding',
       '--disable-background-timer-throttling',
@@ -200,3 +202,4 @@ export async function loginToDevto(options?: {
   console.log(`   ✅ Dev.to logged in via Google (${account.email})`);
   return page;
 }
+

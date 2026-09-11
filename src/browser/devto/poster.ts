@@ -3,6 +3,23 @@ import TurndownService from 'turndown';
 import { injectUTM, UTM_PARAMS } from '../../utils/utm.js';
 
 const SMALL_DELAY = 800;
+const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+
+async function gotoWithRetry(page: Page, url: string, expectedDomain: string, retries = 3): Promise<void> {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    } catch { /* timeout — check URL anyway */ }
+    const landed = page.url();
+    if (landed !== 'about:blank' && landed !== '' && landed.includes(expectedDomain)) return;
+    console.log(`   ⚠️ Navigation to ${url} landed on "${landed}" (attempt ${attempt}/${retries}) — retrying...`);
+    await sleep(3000);
+  }
+  const final = page.url();
+  if (final === 'about:blank' || final === '' || !final.includes(expectedDomain)) {
+    throw new Error(`Failed to navigate to ${url} after ${retries} attempts. Landed on: ${final}`);
+  }
+}
 
 /**
  * Convert HTML to Markdown for Dev.to editor
@@ -32,9 +49,6 @@ export async function postToDevto(
   title: string,
   htmlContent: string,
 ): Promise<{ success: true; postUrl: string; postedAt: Date }> {
-  console.log('   Navigating to Dev.to...');
-  await page.goto('https://dev.to/', { waitUntil: 'domcontentloaded', timeout: 30000 });
-
   // UTM safety net — ensure correct UTMs before posting
   htmlContent = injectUTM(htmlContent, UTM_PARAMS.Devto);
 
@@ -42,20 +56,19 @@ export async function postToDevto(
   console.log('   Converting HTML to Markdown...');
   const markdownContent = htmlToMarkdown(htmlContent);
 
-  // Click create post button
-  console.log('   Clicking create post button...');
-  try {
-    await page.click('.js-policy-article-create');
-    await page.waitForTimeout(2000);
-  } catch {
-    throw new Error('Create post button not found');
-  }
+  // Navigate directly to new post page
+  console.log('   Navigating to Dev.to new post...');
+  await gotoWithRetry(page, 'https://dev.to/new', 'dev.to');
+  await sleep(2000);
 
   // Fill title
   console.log('   Filling title...');
   try {
-    await page.click('#article-form-title');
-    await page.fill('#article-form-title', title);
+    const titleSel = 'textarea#article-form-title, input#article-form-title, textarea[placeholder*="title" i], textarea[aria-label*="title" i]';
+    await page.waitForSelector(titleSel, { timeout: 15000 });
+    await page.click(titleSel);
+    await sleep(300);
+    await page.fill(titleSel, title);
     await page.waitForTimeout(SMALL_DELAY);
   } catch {
     throw new Error('Title field not found or not writable');
@@ -101,8 +114,45 @@ export async function postToDevto(
     throw new Error('Publish button not found');
   }
 
-  // Get published URL from address bar
-  const publishedUrl = page.url();
+  // Wait for navigation to published article URL
+  let publishedUrl = page.url();
+  try {
+    await page.waitForURL(
+      url => url.startsWith('https://dev.to/') && !url.includes('/new') && !url.includes('about:blank') && url.split('/').length >= 5,
+      { timeout: 30000 }
+    );
+    publishedUrl = page.url();
+  } catch {
+    // fallback 1: look for canonical link in page head
+    try {
+      const canonical = await page.$eval('link[rel="canonical"]', (el: any) => el.href).catch(() => '');
+      if (canonical && canonical.startsWith('https://dev.to/') && !canonical.includes('/new')) {
+        publishedUrl = canonical;
+      }
+    } catch { /* ignore */ }
+
+    // fallback 2: look for "View post" or article link — exclude share/social links
+    if (!publishedUrl || publishedUrl.includes('/new')) {
+      try {
+        const links = await page.$$('a[href^="https://dev.to/"]');
+        for (const link of links) {
+          const href = await link.getAttribute('href') || '';
+          if (
+            href.startsWith('https://dev.to/') &&
+            !href.includes('/new') &&
+            !href.includes('/settings') &&
+            !href.includes('twitter.com') &&
+            !href.includes('intent') &&
+            href.split('/').length >= 5
+          ) {
+            publishedUrl = href;
+            break;
+          }
+        }
+      } catch { /* keep existing url */ }
+    }
+  }
+  if (!publishedUrl || publishedUrl === 'about:blank' || publishedUrl.includes('/new')) publishedUrl = page.url();
   console.log(`   ✅ Post published. URL: ${publishedUrl}`);
 
   return {

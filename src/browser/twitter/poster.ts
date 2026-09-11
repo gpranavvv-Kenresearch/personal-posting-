@@ -2,6 +2,52 @@ import { Page } from 'playwright';
 import { humanDelay } from '../stagehand.js';
 import 'dotenv/config';
 
+// Simulates real keystroke typing — `insertText` bypasses key events and is
+// detected as automation. This fires actual keydown/keypress/keyup per char.
+async function humanType(page: Page, text: string): Promise<void> {
+  for (const char of text) {
+    await page.keyboard.type(char, { delay: Math.floor(Math.random() * 55) + 25 });
+    if (Math.random() < 0.04) await humanDelay(80, 250); // occasional natural pause
+  }
+}
+
+// ── Type + verify ───────────────────────────────────────────────────────────
+// X occasionally drops keystrokes mid-type (focus hiccups, React re-renders),
+// leaving the composer with truncated/garbled text. After typing, read back
+// what's actually in the composer and compare — if it doesn't match, clear
+// the box (Ctrl+A, Backspace) and retype, up to a few attempts.
+
+function normalizeForCompare(s: string): string {
+  return s.replace(/\s+/g, ' ').trim();
+}
+
+async function typeWithVerification(
+  page: Page,
+  slotIndex: number,
+  text: string,
+  maxAttempts = 3
+): Promise<void> {
+  const textarea = page.locator(`[data-testid="tweetTextarea_${slotIndex}"]`).first();
+  const expected = normalizeForCompare(text);
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    await humanType(page, text);
+    await humanDelay(500, 800);
+
+    const actual = normalizeForCompare(await textarea.innerText().catch(() => ''));
+    if (actual === expected) return;
+
+    console.log(`   ⚠️ Typed text incomplete/mismatched (attempt ${attempt}/${maxAttempts}) — clearing and retyping...`);
+    await textarea.click().catch(() => {});
+    await page.keyboard.press('Control+A');
+    await humanDelay(150, 300);
+    await page.keyboard.press('Backspace');
+    await humanDelay(300, 500);
+  }
+
+  console.warn(`   ⚠️ Tweet text still doesn't match expected content after ${maxAttempts} attempts — proceeding with what's typed.`);
+}
+
 // ── Character counter ──────────────────────────────────────────────────────
 // Reads the X composer counter (e.g. "-2" means 2 chars over the limit).
 
@@ -90,26 +136,31 @@ async function dismissPopups(page: Page): Promise<void> {
 }
 
 async function openTweetComposer(page: Page, xHandle: string): Promise<void> {
+  void xHandle; // kept for call-site compatibility, no longer used for an error message
   const inlineComposer = page.locator('[data-testid="tweetTextarea_0"]').first();
   if (await inlineComposer.isVisible({ timeout: 8000 }).catch(() => false)) {
     await inlineComposer.click();
     return;
   }
 
-  const composeTriggers = [
-    page.locator('[data-testid="SideNav_NewTweet_Button"]').first(),
-    page.locator('a[href="/compose/tweet"]').first(),
-    page.getByRole('link', { name: /^post$/i }).first(),
-    page.getByRole('button', { name: /^post$/i }).first(),
-  ];
-
-  for (const trigger of composeTriggers) {
-    if (await trigger.isVisible({ timeout: 2000 }).catch(() => false)) {
-      await trigger.click({ force: true });
-      await humanDelay(1000, 1500);
-      break;
-    }
-  }
+  // Disabled per explicit instruction — do not click these 4 fallback
+  // trigger buttons (SideNav_NewTweet_Button, /compose/tweet link, role=link
+  // "Post", role=button "Post") when the inline composer isn't immediately
+  // visible. Falls straight through to the direct composer locate below.
+  // const composeTriggers = [
+  //   page.locator('[data-testid="SideNav_NewTweet_Button"]').first(),
+  //   page.locator('a[href="/compose/tweet"]').first(),
+  //   page.getByRole('link', { name: /^post$/i }).first(),
+  //   page.getByRole('button', { name: /^post$/i }).first(),
+  // ];
+  //
+  // for (const trigger of composeTriggers) {
+  //   if (await trigger.isVisible({ timeout: 2000 }).catch(() => false)) {
+  //     await trigger.click({ force: true });
+  //     await humanDelay(1000, 1500);
+  //     break;
+  //   }
+  // }
 
   const composer = page.locator('[data-testid="tweetTextarea_0"], div[role="textbox"][contenteditable="true"]').first();
   if (await composer.isVisible({ timeout: 10000 }).catch(() => false)) {
@@ -117,7 +168,11 @@ async function openTweetComposer(page: Page, xHandle: string): Promise<void> {
     return;
   }
 
-  throw new Error(`LOGIN_REQUIRED:${xHandle} — account not logged in or X composer not available. Run: npm run dev -- save-x-session ${xHandle}`);
+  // No hard failure here — we're already sitting on x.com/home from postTweet's
+  // own navigation. Let the click just no-op instead of throwing, so the
+  // browser stays open and whatever's actually on screen is visible for
+  // inspection rather than getting torn down by a synthetic login check.
+  console.warn('   ⚠️ Tweet composer not found on x.com/home — continuing anyway (nothing was clicked).');
 }
 
 export async function postTweet(page: Page, tweetText: string, handle?: string) {
@@ -135,8 +190,8 @@ export async function postTweet(page: Page, tweetText: string, handle?: string) 
   await openTweetComposer(page, xHandle);
   await humanDelay(1000, 1500);
 
-  console.log('   Pasting tweet...');
-  await page.keyboard.insertText(tweetText);
+  console.log('   Typing tweet...');
+  await typeWithVerification(page, 0, tweetText);
   await humanDelay(800, 1200);
 
   // Check character counter — if over limit, abort and signal for regeneration
@@ -231,7 +286,7 @@ export async function postThread(page: Page, tweets: string[], handle?: string) 
     await humanDelay(500, 800);
 
     console.log(`   Typing tweet ${i + 1}/${tweets.length}...`);
-    await page.keyboard.insertText(tweet);
+    await typeWithVerification(page, i, tweet);
     await humanDelay(800, 1200);
 
     // If not the last tweet — click Add post button to open next slot

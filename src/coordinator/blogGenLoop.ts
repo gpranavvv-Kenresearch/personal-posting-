@@ -18,7 +18,15 @@
 import { generateBlogViaChatGpt } from '../agents/blogGenAgent.js';
 import { generateBlogCoverImage } from '../agents/blogImageAgent.js';
 import { runBlogSanityChecks } from '../agents/blogSanityAgent.js';
-import { getContentPoolRowsNeedingGeneration, saveGeneratedBlogToPool, getSheetRowByIndex } from '../sheets/sheets.js';
+import { validateBrandAuthority } from '../agents/blogBrandValidator.js';
+import { applyPreferredSourceCTA, validatePreferredSourceCTA, PreferredSourceMode } from '../agents/blogPreferredSourceAgent.js';
+import { getContentPoolRowsNeedingGeneration, saveGeneratedBlogToPool, saveCoverImageUrlToPool, getSheetRowByIndex } from '../sheets/sheets.js';
+
+// 'tracked' by default — lets us start collecting Preferred Source CTA Click
+// data from day one (can't back-fill it later). Switch to 'direct' here (or
+// wire up per-row rotation) once there's baseline click data to compare
+// against. See src/agents/blogPreferredSourceAgent.ts for what each mode does.
+const PREFERRED_SOURCE_MODE: PreferredSourceMode = 'tracked';
 
 /** Force the cover image into the article HTML — replaces a model-written <img> if any, else prepends one. */
 function injectCoverImage(html: string, imageUrl: string, altText: string): string {
@@ -79,13 +87,25 @@ export async function runBlogGenBatch(opts: BlogGenBatchOptions = {}): Promise<{
     let attemptsLeft = retryOnVerifyFail ? 2 : 1;
     let rowOk = false;
 
+    // Cover image lives OUTSIDE the retry loop: once generated (this attempt,
+    // a previous attempt, or a previous pass that already wrote it to the
+    // sheet), it is reused — the ~9-min image generation never re-runs just
+    // because the blog side failed validation and is being retried.
+    let coverImageUrl = (row.coverImageUrl || '').trim();
+    if (coverImageUrl) console.log(`   Reusing existing cover image from sheet: ${coverImageUrl}`);
+
     while (attemptsLeft > 0 && !rowOk) {
       attemptsLeft--;
       try {
-        let coverImageUrl = '';
         let blog: { title: string; description: string; html: string };
 
-        if (opts.withImage) {
+        // Randomly pick V1 (buildMasterBlogPrompt) or V2 (keyword-focused
+        // buildMasterBlogPromptV2) per row — the two prompts stay fully
+        // separate in blogGenAgent.ts, this just rotates which one runs.
+        const promptVersion: 'v1' | 'v2' = Math.random() < 0.5 ? 'v1' : 'v2';
+        console.log(`   Prompt version: ${promptVersion}`);
+
+        if (opts.withImage && !coverImageUrl) {
           // Blog (Chrome window #1) and cover image (Chrome window #2) run
           // concurrently — two separate, independent browser contexts.
           console.log(`   Opening 2 parallel Chrome windows (blog + image)...`);
@@ -95,16 +115,28 @@ export async function runBlogGenBatch(opts: BlogGenBatchOptions = {}): Promise<{
               reportUrl: row.targetUrl,
               promptChoice: opts.imagePromptChoice ?? '1',
               accountHandle: opts.imageAccountHandle,
-            }).catch((imgErr: any) => {
-              console.log(`   ⚠️ Cover image failed — continuing without one: ${imgErr.message}`);
-              return '';
-            }),
-            generateBlogViaChatGpt({ title, url: row.targetUrl, accountHandle: opts.blogAccountHandle }),
+            })
+              .then(async (url) => {
+                // Write the image URL to the sheet the moment it exists —
+                // don't wait for the blog, which may still fail/retry.
+                if (url) {
+                  coverImageUrl = url;
+                  await saveCoverImageUrlToPool(row, url, 'newLogic').catch((e: any) =>
+                    console.log(`   ⚠️ Could not save cover image URL immediately (will be saved with the blog): ${e.message}`));
+                }
+                return url;
+              })
+              .catch((imgErr: any) => {
+                console.log(`   ⚠️ Cover image failed — continuing without one: ${imgErr.message}`);
+                return '';
+              }),
+            generateBlogViaChatGpt({ title, url: row.targetUrl, accountHandle: opts.blogAccountHandle, promptVersion }),
           ]);
-          coverImageUrl = imgResult;
+          if (imgResult) coverImageUrl = imgResult;
           blog = blogResult;
         } else {
-          blog = await generateBlogViaChatGpt({ title, url: row.targetUrl, accountHandle: opts.blogAccountHandle });
+          if (opts.withImage) console.log(`   Cover image already available — opening 1 Chrome window (blog only)...`);
+          blog = await generateBlogViaChatGpt({ title, url: row.targetUrl, accountHandle: opts.blogAccountHandle, promptVersion });
         }
 
         const htmlWithImage = coverImageUrl ? injectCoverImage(blog.html, coverImageUrl, title) : blog.html;
@@ -114,7 +146,24 @@ export async function runBlogGenBatch(opts: BlogGenBatchOptions = {}): Promise<{
           console.log(`   [BLOG SANITY] Applied: ${sanity.changes.join(', ')}`);
         }
 
-        await saveGeneratedBlogToPool(row, { title: blog.title, description: blog.description, html: sanity.html }, 'newLogic');
+        const preferredSource = applyPreferredSourceCTA(sanity.html, { mode: PREFERRED_SOURCE_MODE, title: blog.title || title });
+        console.log(`   [PREFERRED SOURCE] ${preferredSource.applied ? `Inserted (${preferredSource.placement})` : `Skipped (${preferredSource.placement})`}`);
+        const preferredSourceCheck = validatePreferredSourceCTA(preferredSource.html, PREFERRED_SOURCE_MODE);
+        if (preferredSourceCheck.status !== 'PASS') {
+          console.log(`   [PREFERRED SOURCE] ⚠️ Validation issues (non-fatal): ${preferredSourceCheck.issues.join(' | ')}`);
+        }
+
+        const brandCheck = validateBrandAuthority(preferredSource.html, { title: blog.title || title });
+        if (brandCheck.status !== 'PASS') {
+          const issueSummary = brandCheck.issues.map((i) => `${i.rule}: ${i.problem}`).join(' | ');
+          throw new Error(`BRAND_VALIDATION_FAILED (score ${brandCheck.score}/10): ${issueSummary}`);
+        }
+        console.log(`   [BRAND CHECK] PASS (score ${brandCheck.score}/10)`);
+        if (brandCheck.issues.length > 0) {
+          console.log(`   [BRAND CHECK] Advisory (non-blocking): ${brandCheck.issues.map((i) => `${i.rule}: ${i.problem}`).join(' | ')}`);
+        }
+
+        await saveGeneratedBlogToPool(row, { coverImageUrl, html: preferredSource.html }, 'newLogic');
 
         console.log(`   Verifying write for row ${row.rowIndex}...`);
         const verdict = await verifyWrite(row.rowIndex, !!opts.withImage);

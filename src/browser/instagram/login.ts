@@ -1,7 +1,8 @@
-import { chromium, BrowserContext, Page } from 'playwright';
+﻿import { chromium, BrowserContext, Page } from 'playwright';
 import path from 'path';
 import fs from 'fs';
 import 'dotenv/config';
+import { killChromeForProfile } from '../../utils/killChrome.js';
 
 export interface InstagramAccount {
   nickname: string;
@@ -41,6 +42,7 @@ export async function loginToInstagram(account: InstagramAccount): Promise<Page>
 
   const sessionDir = path.resolve(`${SESSION_ROOT}/instagram-${account.nickname}`);
   fs.mkdirSync(sessionDir, { recursive: true });
+  await killChromeForProfile(sessionDir);
 
   const chromePath = process.env.CHROME_PATH || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
   if (!fs.existsSync(chromePath)) {
@@ -48,12 +50,12 @@ export async function loginToInstagram(account: InstagramAccount): Promise<Page>
   }
 
   browserContext = await chromium.launchPersistentContext(sessionDir, {
-    headless: false,
+    headless: true,
     executablePath: chromePath,
     slowMo: 50,
     ignoreDefaultArgs: ['--enable-automation'],
     args: [
-      '--no-sandbox',
+      '--start-minimized',
       '--window-size=1366,768',
       '--disable-blink-features=AutomationControlled',
       '--disable-renderer-backgrounding',
@@ -122,3 +124,4 @@ export async function loginToInstagram(account: InstagramAccount): Promise<Page>
 
   return page;
 }
+

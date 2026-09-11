@@ -3,13 +3,9 @@
  * Posts from 15 LI accounts SEQUENTIALLY (not parallel)
  */
 
-import Anthropic from '@anthropic-ai/sdk';
-import { BROWSER_TOOLS, executeBrowserTool } from '../tools/browserTools.js';
+import { executeBrowserTool } from '../tools/browserTools.js';
 import { getAccounts } from '../config/accounts.js';
-import type { MessageParam } from '@anthropic-ai/sdk/resources/messages.js';
 import type { SheetRow } from '../sheets/sheets.js';
-
-const MODEL = 'claude-opus-4-1';
 
 export interface LiBatchResult {
   posted: number;
@@ -44,7 +40,10 @@ export async function runLiBatchAgent(params: {
     const account = liAccounts[i];
     const row = params.rows[i];
 
-    const postResult = await postToLiAccount(account.nickname || account.handle, row.liPost || '');
+    const pdfPath = (row.imagesUrl || '').trim();
+    const postResult = pdfPath
+      ? await postToLiAccountCarousel(account.nickname || account.handle, row.linkedinPost || '', pdfPath)
+      : await postToLiAccount(account.nickname || account.handle, row.linkedinPost || '');
 
     result.results.push({
       nickname: account.nickname || account.handle,
@@ -69,121 +68,48 @@ export async function runLiBatchAgent(params: {
 }
 
 /**
- * Post to single LI account
+ * Post to single LI account with carousel PDF
  */
-async function postToLiAccount(nickname: string, postText: string): Promise<{
+async function postToLiAccountCarousel(nickname: string, postText: string, pdfPath: string): Promise<{
   success: boolean;
   postUrl?: string;
   error?: string;
 }> {
-  const client = new Anthropic({
-    apiKey: process.env.ANTHROPIC_API_KEY,
-  });
-
-  const systemPrompt = `You are a LinkedIn posting specialist. Post the given text to LinkedIn.
-
-Steps:
-1. Call login_linkedin with the account nickname
-2. Call post_linkedin with the post text
-3. Return result as JSON
-
-Return format: { "success": boolean, "postUrl": string or null, "error": string or null }`;
-
-  const userPrompt = `Post this to LinkedIn account (${nickname}):
-
-"${postText}"
-
-Return ONLY JSON with the result.`;
-
-  let messages: MessageParam[] = [
-    { role: 'user', content: userPrompt },
-  ];
-
   try {
-    for (let attempt = 0; attempt < 2; attempt++) {
-      const response = await client.messages.create({
-        model: MODEL,
-        max_tokens: 1024,
-        system: systemPrompt,
-        tools: BROWSER_TOOLS,
-        messages,
-      });
-
-      if (response.stop_reason === 'end_turn') {
-        return parseLiResult(response.content);
-      }
-
-      const toolUses = response.content.filter(b => b.type === 'tool_use');
-      if (toolUses.length === 0) {
-        return parseLiResult(response.content);
-      }
-
-      messages.push({
-        role: 'assistant',
-        content: response.content,
-      });
-
-      // Execute tools
-      const toolResults = await Promise.all(
-        toolUses.map(async (tu) => ({
-          type: 'tool_result' as const,
-          tool_use_id: tu.id,
-          content: JSON.stringify(
-            await executeBrowserTool(tu.name, tu.input as Record<string, any>),
-          ),
-        })),
-      );
-
-      messages.push({
-        role: 'user',
-        content: toolResults,
-      });
-
-      // Check if successful
-      if (toolResults.some(r => JSON.parse(r.content).success)) {
-        const finalResponse = await client.messages.create({
-          model: MODEL,
-          max_tokens: 512,
-          system: systemPrompt,
-          tools: BROWSER_TOOLS,
-          messages,
-        });
-
-        return parseLiResult(finalResponse.content);
-      }
+    console.log(`   [Carousel] PDF path: ${pdfPath}`);
+    const loginResult = await executeBrowserTool('login_linkedin', { nickname });
+    if (!loginResult.success) {
+      return { success: false, error: loginResult.error || 'Login failed' };
     }
-
-    return { success: false, error: 'Failed to post to LinkedIn' };
+    const postResult = await executeBrowserTool('post_linkedin_carousel', { nickname, postText, pdfPath });
+    return {
+      success: postResult.success ?? false,
+      postUrl: postResult.postUrl,
+      error: postResult.error,
+    };
   } catch (err: any) {
     return { success: false, error: err.message };
   }
 }
 
 /**
- * Parse LI result
+ * Post to single LI account — direct tool calls, no LLM
  */
-function parseLiResult(content: any[]): {
+async function postToLiAccount(nickname: string, postText: string): Promise<{
   success: boolean;
   postUrl?: string;
   error?: string;
-} {
-  const textContent = content.find(b => b.type === 'text');
-  if (!textContent || textContent.type !== 'text') {
-    return { success: false, error: 'No response' };
-  }
-
+}> {
   try {
-    const text = textContent.text;
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) {
-      return { success: false, error: 'Could not parse response' };
+    const loginResult = await executeBrowserTool('login_linkedin', { nickname });
+    if (!loginResult.success) {
+      return { success: false, error: loginResult.error || 'Login failed' };
     }
-
-    const parsed = JSON.parse(jsonMatch[0]);
+    const postResult = await executeBrowserTool('post_linkedin', { nickname, postText });
     return {
-      success: parsed.success ?? false,
-      postUrl: parsed.postUrl,
-      error: parsed.error,
+      success: postResult.success ?? false,
+      postUrl: postResult.postUrl,
+      error: postResult.error,
     };
   } catch (err: any) {
     return { success: false, error: err.message };

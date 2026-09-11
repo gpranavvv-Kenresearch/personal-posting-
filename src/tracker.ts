@@ -22,19 +22,23 @@ const SHEETS = [
 // Platform definitions: column name for status, error, and lastPosted
 const PLATFORMS = [
   // Social
-  { key: 'x',               statusCol: 'X Status',               errorCol: 'X Error',               lastPostedCol: 'lastPostedX',              sheet: 'social' },
-  { key: 'facebook',        statusCol: 'FB Status',              errorCol: 'FB Error',              lastPostedCol: 'lastPostedFb',             sheet: 'social' },
-  { key: 'linkedin',        statusCol: 'LinkedIn Status',        errorCol: 'LinkedIn Error',        lastPostedCol: 'lastPostedLi',             sheet: 'social' },
+  { key: 'x',               displayName: 'X',              statusCol: 'X Status',               errorCol: 'X Error',               lastPostedCol: 'lastPostedX',              sheet: 'social' },
+  { key: 'facebook',        displayName: 'Facebook',       statusCol: 'FB Status',              errorCol: 'FB Error',              lastPostedCol: 'lastPostedFb',             sheet: 'social' },
+  { key: 'linkedin',        displayName: 'LinkedIn',       statusCol: 'LinkedIn Status',        errorCol: 'LinkedIn Error',        lastPostedCol: 'lastPostedLi',             sheet: 'social' },
   // Blog
-  { key: 'medium',          statusCol: 'Medium Status',          errorCol: 'Medium Error',          lastPostedCol: 'lastPostedMedium',         sheet: 'blog' },
-  { key: 'linkmate',        statusCol: 'Linkmate Status',        errorCol: 'Linkmate Error',        lastPostedCol: 'lastPostedLinkmate',       sheet: 'blog' },
-  { key: 'googlesite',      statusCol: 'Google Site Status',     errorCol: 'Google Site Error',     lastPostedCol: 'lastPostedGoogleSite',     sheet: 'blog' },
-  { key: 'devto',           statusCol: 'Dev.to Status',          errorCol: 'Dev.to Error',          lastPostedCol: 'lastPostedDevto',          sheet: 'blog' },
-  { key: 'linkedinpulse',   statusCol: 'LinkedIn Pulse Status',  errorCol: 'LinkedIn Pulse Error',  lastPostedCol: 'lastPosted linkedin Pulse', sheet: 'blog' },
-  { key: 'calisthenics',    statusCol: 'Calisthenics Status',    errorCol: 'Calisthenics Error',    lastPostedCol: 'lastPostedCalisthenics',   sheet: 'blog' },
-  { key: 'substack',        statusCol: 'Substack Status',        errorCol: 'Substack Error',        lastPostedCol: 'lastPostedSubstack',       sheet: 'blog' },
-  { key: 'guffiz',          statusCol: 'Guffiz Status',          errorCol: 'Guffiz Error',          lastPostedCol: 'lastPostedGuffiz',         sheet: 'blog' },
-  { key: 'hackmd',          statusCol: 'HackMD Status',          errorCol: 'HackMD Error',          lastPostedCol: 'lastPostedHackmd',         sheet: 'blog' },
+  { key: 'hackmd',          displayName: 'HackMD',         statusCol: 'HackMD Status',          errorCol: 'HackMD Error',          lastPostedCol: 'lastPostedHackmd',         sheet: 'blog' },
+  { key: 'googlesite',      displayName: 'Google Sites',   statusCol: 'Google Site Status',     errorCol: 'Google Site Error',     lastPostedCol: 'lastPostedGoogleSite',     sheet: 'blog' },
+  { key: 'devto',           displayName: 'Dev.to',         statusCol: 'Dev.to Status',          errorCol: 'Dev.to Error',          lastPostedCol: 'lastPostedDevto',          sheet: 'blog' },
+  { key: 'linkmate',        displayName: 'Linkmate',       statusCol: 'Linkmate Status',        errorCol: 'Linkmate Error',        lastPostedCol: 'lastPostedLinkmate',       sheet: 'blog' },
+  { key: 'calisthenics',    displayName: 'Calisthenics',   statusCol: 'Calisthenics Status',    errorCol: 'Calisthenics Error',    lastPostedCol: 'lastPostedCalisthenics',   sheet: 'blog' },
+  { key: 'wordpress',       displayName: 'WordPress',      statusCol: 'WordPress Status',       errorCol: 'WordPress Error',       lastPostedCol: 'lastPostedWordpress',      sheet: 'blog' },
+  { key: 'blogger',         displayName: 'Blogger',        statusCol: 'Blogger Status',         errorCol: 'Blogger Error',         lastPostedCol: 'lastPostedBlogger',        sheet: 'blog' },
+  { key: 'linkedinpulse',   displayName: 'LinkedIn Pulse', statusCol: 'LinkedIn Pulse Status',  errorCol: 'LinkedIn Pulse Error',  lastPostedCol: 'lastPosted linkedin Pulse', sheet: 'blog' },
+  { key: 'medium',          displayName: 'Medium',         statusCol: 'Medium Status',          errorCol: 'Medium Error',          lastPostedCol: 'lastPostedMedium',         sheet: 'blog' },
+  { key: 'notion',          displayName: 'Notion',         statusCol: 'Notion Status',          errorCol: 'Notion Error',          lastPostedCol: 'lastPostedNotion',         sheet: 'blog' },
+  { key: 'substack',        displayName: 'Substack',       statusCol: 'Substack Status',        errorCol: 'Substack Error',        lastPostedCol: 'lastPostedSubstack',       sheet: 'blog' },
+  { key: 'paragraph',       displayName: 'Paragraph',      statusCol: 'Paragraph Status',       errorCol: 'Paragraph Error',       lastPostedCol: 'lastPostedParagraph',      sheet: 'blog' },
+  { key: 'ameba',           displayName: 'Ameba',          statusCol: 'Ameba Status',           errorCol: 'Ameba Error',           lastPostedCol: 'lastPostedAmeba',          sheet: 'blog' },
 ];
 
 // ──── Auth ────────────────────────────────────────────────────────────────
@@ -176,6 +180,126 @@ export async function runTracker(): Promise<TrackerResult> {
   return { date: today, platforms, grandTotal };
 }
 
+// ──── Build the today-summary table as a string ───────────────────────────
+
+export function buildTodaySummaryText(r: TrackerResult): string {
+  const nameWidth = Math.max(
+    'Platform'.length,
+    ...PLATFORMS.map(p => p.displayName.length),
+    'TOTAL'.length,
+  );
+  const countWidth = 6;
+  const sep = `+${'-'.repeat(nameWidth + 2)}+${'-'.repeat(countWidth + 2)}+`;
+
+  const lines: string[] = [];
+  lines.push(`Today's Posting Summary — ${r.date}`);
+  lines.push('');
+  lines.push(sep);
+  lines.push(`| ${'Platform'.padEnd(nameWidth)} | ${'Posts'.padStart(countWidth)} |`);
+  lines.push(sep);
+
+  let total = 0;
+  for (const p of PLATFORMS) {
+    const count = r.platforms[p.key]?.postedToday ?? 0;
+    total += count;
+    lines.push(`| ${p.displayName.padEnd(nameWidth)} | ${String(count).padStart(countWidth)} |`);
+  }
+
+  lines.push(sep);
+  lines.push(`| ${'TOTAL'.padEnd(nameWidth)} | ${String(total).padStart(countWidth)} |`);
+  lines.push(sep);
+  return lines.join('\n');
+}
+
+// ──── Teams webhook poster ────────────────────────────────────────────────
+
+export async function postTodaySummaryToTeams(r: TrackerResult): Promise<void> {
+  const url = process.env.TEAMS_WEBHOOK_URL;
+  if (!url) {
+    console.warn('⚠️  TEAMS_WEBHOOK_URL not set — skipping Teams post.');
+    return;
+  }
+
+  // Build a table of facts for the Adaptive Card
+  const facts = PLATFORMS.map(p => ({
+    title: p.displayName,
+    value: String(r.platforms[p.key]?.postedToday ?? 0),
+  }));
+  const total = facts.reduce((s, f) => s + Number(f.value), 0);
+  facts.push({ title: 'TOTAL', value: String(total) });
+
+  const payload = {
+    type: 'message',
+    attachments: [
+      {
+        contentType: 'application/vnd.microsoft.card.adaptive',
+        contentUrl: null,
+        content: {
+          $schema: 'http://adaptivecards.io/schemas/adaptive-card.json',
+          type: 'AdaptiveCard',
+          version: '1.4',
+          body: [
+            {
+              type: 'TextBlock',
+              size: 'Large',
+              weight: 'Bolder',
+              text: `📊 Today's Posting Summary — ${r.date}`,
+              wrap: true,
+            },
+            {
+              type: 'FactSet',
+              facts,
+            },
+          ],
+        },
+      },
+    ],
+  };
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    console.error(`❌ Teams webhook failed: ${res.status} ${res.statusText}\n${body}`);
+    return;
+  }
+  console.log('✅ Summary posted to Teams.');
+}
+
+// ──── Today-only summary printer ──────────────────────────────────────────
+
+export function printTodaySummary(r: TrackerResult): void {
+  const nameWidth = Math.max(
+    'Platform'.length,
+    ...PLATFORMS.map(p => p.displayName.length),
+    'TOTAL'.length,
+  );
+  const countWidth = 6;
+
+  const sep = `+${'-'.repeat(nameWidth + 2)}+${'-'.repeat(countWidth + 2)}+`;
+
+  console.log(`\nToday's Posting Summary — ${r.date}\n`);
+  console.log(sep);
+  console.log(`| ${'Platform'.padEnd(nameWidth)} | ${'Posts'.padStart(countWidth)} |`);
+  console.log(sep);
+
+  let total = 0;
+  for (const p of PLATFORMS) {
+    const count = r.platforms[p.key]?.postedToday ?? 0;
+    total += count;
+    console.log(`| ${p.displayName.padEnd(nameWidth)} | ${String(count).padStart(countWidth)} |`);
+  }
+
+  console.log(sep);
+  console.log(`| ${'TOTAL'.padEnd(nameWidth)} | ${String(total).padStart(countWidth)} |`);
+  console.log(sep);
+  console.log('');
+}
+
 // ──── Pretty printer ──────────────────────────────────────────────────────
 
 export function printTrackerReport(r: TrackerResult): void {
@@ -203,7 +327,7 @@ export function printTrackerReport(r: TrackerResult): void {
 
   // Blog platforms
   console.log(`  ${'--- Blogs ---'.padEnd(hdr.length)}`);
-  for (const key of ['medium', 'linkmate', 'googlesite', 'devto', 'linkedinpulse', 'calisthenics', 'substack', 'guffiz', 'hackmd']) {
+  for (const key of ['medium', 'linkmate', 'googlesite', 'devto', 'linkedinpulse', 'calisthenics', 'substack', 'hackmd']) {
     printPlatformRow(r.platforms[key], key);
   }
 

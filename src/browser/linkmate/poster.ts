@@ -41,27 +41,26 @@ export async function postToLinkmate(
       contentWithUtm = $.html();
     }
 
-    // Navigate to Linkmate create page
+    // Wait for Create button then click
     console.log('   Navigating to Linkmate composer...');
-    const createBtn = page.locator('a[title="Create"]').first();
-    await createBtn.click({ delay: 150 }).catch(() => {});
-    await randomDelay(1000, 1500);
+    await page.waitForSelector('a[title="Create"]', { timeout: 30000 });
+    await page.locator('a[title="Create"]').first().click({ delay: 150 });
+    await sleep(800);
 
-    // Click on space name (assuming first result is the space)
+    // Click on space name
     console.log('   Selecting space...');
-    const spaceBtn = page.locator('span.text-color-title-link.space-name.result-item').first();
-    if (await spaceBtn.isVisible().catch(() => false)) {
-      await spaceBtn.click({ delay: 150 }).catch(() => {});
-      await randomDelay(1000, 1500);
+    const spaceBtn = await page.waitForSelector('span.text-color-title-link.space-name.result-item', { timeout: 10000 }).catch(() => null);
+    if (spaceBtn) {
+      await spaceBtn.click();
+      await sleep(800);
     }
 
-    // Click Article
+    // Click Article and wait for editor
     console.log('   Clicking Article...');
-    const articleBtn = page.locator('a[title="Article"]').first();
-    if (await articleBtn.isVisible().catch(() => false)) {
-      await articleBtn.click({ delay: 150 }).catch(() => {});
-      await randomDelay(3000, 4000);
-    }
+    await page.waitForSelector('a[title="Article"]', { timeout: 15000 });
+    await page.locator('a[title="Article"]').first().click({ delay: 150 });
+    // Wait for title editor to signal the article editor is fully loaded
+    await page.waitForSelector('p[data-placeholder="Title"]', { timeout: 30000 });
 
     // Fill title
     console.log('   Filling title...');
@@ -104,18 +103,17 @@ export async function postToLinkmate(
     console.log('   Clicking Publish...');
     try {
       const publishBtn = page.locator('a#post-publish-submit-button:not(.disabled)').first();
-      if (await publishBtn.isVisible({ timeout: 10000 }).catch(() => false)) {
-        await publishBtn.click({ delay: 150 }).catch(() => {});
-        await randomDelay(3000, 5000);
-      } else {
-        console.warn('   ⚠️ Publish button not found or disabled');
-      }
+      await publishBtn.waitFor({ state: 'visible', timeout: 20000 });
+      await publishBtn.click({ delay: 150 }).catch(() => {});
+      // Wait for navigation away from the editor
+      await page.waitForFunction(
+        () => !window.location.href.includes('/posts/new'),
+        { timeout: 15000 }
+      ).catch(() => {});
     } catch (err) {
       console.warn(`   ⚠️ Could not click publish: ${(err as any).message}`);
     }
 
-    // Extract final URL from address bar
-    await page.waitForTimeout(2000);
     const postUrl = page.url();
     console.log(`   ✅ Post published. URL: ${postUrl}`);
 

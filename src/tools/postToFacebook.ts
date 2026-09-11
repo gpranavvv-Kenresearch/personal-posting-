@@ -1,4 +1,4 @@
-/**
+﻿/**
  * postToFacebook.ts — CLI intervention tool for Claude
  *
  * Called by Claude CLI when the main npm run dev Facebook poster fails.
@@ -55,11 +55,11 @@ async function main() {
   }
 
   const ctx = await chromium.launchPersistentContext(sessionDir, {
-    headless: false,
+    headless: true,
     executablePath: chromePath,
     slowMo: 50,
     ignoreDefaultArgs: ['--enable-automation'],
-    args: ['--no-sandbox', '--start-maximized', '--disable-blink-features=AutomationControlled'],
+    args: ['--start-minimized', '--disable-blink-features=AutomationControlled'],
     viewport: { width: 1280, height: 800 },
   });
 
@@ -143,3 +143,4 @@ async function main() {
 }
 
 main();
+

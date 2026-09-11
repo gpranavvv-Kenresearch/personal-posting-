@@ -2,47 +2,61 @@
  * scheduler-new.ts — Static Cron Scheduler (Asia/Kolkata)
  *
  * Rules:
- *   1. ALL batches fire between 11:00 and 18:00 IST — hard limit, no exceptions.
- *   2. LinkedIn (LI), LinkedIn Pulse, and Medium each get a 20-minute exclusive
- *      window: no other batch is scheduled to start during those 20 minutes.
- *   3. Batch counts unchanged: X×9, FB×5, LI×3, GS×2, HackMD×2, Linkmate×2,
- *      Guffiz×2, Calisthenics×2, Substack×1, Dev.to×1, LI Pulse×1, Medium×1.
+ *   1. ALL batches fire between 10:30 and 18:00 IST (7.5-hour window).
+ *   2. LinkedIn (LI) gets protected windows.
+ *   3. All New Logic platforms are permanently assigned to exactly one of 3
+ *      shared slot columns ("Blog Platform N"/"Blog URL N") and each runs on
+ *      its OWN independent cron trigger — no group orchestration for these:
+ *        Slot 1: Linkmate, Blogger, Coda, Medium, Velog
+ *        Slot 2: Calisthenics, Notion, LinkedIn Pulse, Google Sites, PdfHost
+ *        Slot 3: HackMD, WordPress, Dev.to, 4shared
+ *      Whenever a platform's cron fires it independently scans New Logic for
+ *      the next row where its own slot is still empty, posts, and writes
+ *      there — skipping rows a sibling in the same slot already filled.
+ *      Daily run counts: Linkmate/Calisthenics = 3/day each, HackMD/Blogger/
+ *      Notion/Dev.to/WordPress/Velog/Google Sites(→3)/4shared = 2/day
+ *      each (Google Sites is 3/day), Coda/LinkedIn Pulse/Medium = 1/day each.
+ *      Scribd removed from cron (2026-08-27) — headless posting kept hitting
+ *      an unsolvable recaptcha and its manual-login fallback blocked the
+ *      whole daemon; agent/browser code left in place, just not scheduled.
+ *      Group4/Group4b still run (still claim rows + assign "New Name" via
+ *      the 25-name roster) but no longer post to Medium/Google Sites
+ *      themselves — see the empty GROUP_DEFS platforms lists in
+ *      masterCoordinator.ts. Naver and Paragraph are excluded from cron.
+ *   4. FB×5, LI×3, X×2 remain independent, unchanged.
+ *   5. SBM/PPT-PDF platforms (Pearltrees, PdfHost, Instapaper, Raindrop ×3/day
+ *      each; Tumblr ×2/day) run at :05/:35 minute offsets, and the new slot
+ *      platforms above run at :10/:20/:25/:40/:50 offsets — both interleaved
+ *      with the :00/:15/:30/:45 grid below so nothing collides.
+ *   6. Telegraph (×2/day, 11:20 & 13:50) shares the Social Media tab's slot 2
+ *      columns with Facebook/Tumblr/Pearltrees (see runTelegraphBatch in
+ *      masterCoordinator.ts) — no login/accounts, browser-only, added
+ *      2026-09-08.
  *
- * Full timeline (IST):
- *
- *   11:00 → X-1, FB-1, GS-1
- *   11:15 → HackMD-1
- *   11:20 → LI-1         ← PROTECTED window: nothing 11:20–11:40
- *   11:40 → X-2, Linkmate-1
- *   11:55 → Guffiz-1
- *   12:10 → FB-2, Calisthenics-1
- *   12:25 → Substack-1
- *   12:40 → Dev.to-1
- *   12:55 → LI Pulse-1   ← PROTECTED window: nothing 12:55–13:15
- *   13:15 → X-3, FB-3
- *   13:30 → LI-2         ← PROTECTED window: nothing 13:30–13:50
- *   13:50 → X-4, GS-2
- *   14:05 → HackMD-2
- *   14:15 → Medium-1     ← PROTECTED window: nothing 14:15–14:35
- *   14:35 → X-5, Linkmate-2
- *   14:50 → Guffiz-2, FB-4
- *   15:05 → Calisthenics-2
- *   15:15 → LI-3         ← PROTECTED window: nothing 15:15–15:35
- *   15:35 → X-6, FB-5
- *   15:50 → X-7
- *   16:10 → X-8
- *   16:30 → X-9          ← last batch (90 min before 18:00 hard limit)
+ * Full timeline (IST) — see the printed schedule at daemon startup for the
+ * complete, currently-accurate list; kept brief here to avoid drift.
  */
 
 import cron from 'node-cron';
+import { DailySlot, cronExprFor, runSlotOnce, startCatchUpSweeper, startHeartbeat, seedIfOldDaemonRanToday } from './batchLedger.js';
 import {
   runXBatch, runFbBatch, runLiBatch,
-  runMediumBatch, runLinkmateBatch, runGoogleSiteBatch,
-  runDevtoBatch, runLinkedinPulseBatch, runCalisthenicsNBatch,
-  runSubstackBatch, runGuffizBatch, runHackmdBatch,
+  runGroupBatch, GROUP_DEFS,
+  runLinkmateBatch, runCalisthenicsNBatch, runHackmdBatch,
+  runBloggerBatch, runNotionBatch, runDevtoBatch,
+  runCodaBatch, runLinkedinPulseBatch, runWordpressBatch,
   runWeeklySerpRecheck, runSundayExamination, resetBatchCounters,
+  runDailyPostingSummary,
+  runPearltreesBatch, runPdfhostBatch, runInstapaperBatch,
+  runRaindropBatch, runTumblrBatch, runTelegraphBatch,
+  runMediumBatch, runVelogBatch, runGoogleSiteBatch,
+  runFourSharedBatch,
 } from './coordinator/masterCoordinator.js';
-import { runMonitorCycle } from './monitor.js';
+
+function runGroup(name: string) {
+  const def = GROUP_DEFS[name];
+  return () => runGroupBatch(name, def.platforms, def.accountCount, def.batchNum);
+}
 
 function nowIst(): string {
   return new Date().toLocaleTimeString('en-IN', {
@@ -64,148 +78,156 @@ function wrap(label: string, fn: () => Promise<void>) {
   };
 }
 
+// ── Daily posting slots (IST) ─────────────────────────────────────────────
+// One table drives BOTH the node-cron triggers and the missed-slot catch-up
+// sweeper (see batchLedger.ts). node-cron silently skips any slot it misses
+// (event-loop block, sleep/hibernate, restart) — the sweeper re-runs those
+// from this same list, and the ledger guarantees each label runs once/day.
+// Grid: :00/:15/:30/:45 = FB/LI/X/New-Logic slots; :05/:35 = SBM/PDF;
+// :10/:20 = Medium/Velog/Google Sites/4shared. LI slots are protected windows.
+export const DAILY_SLOTS: DailySlot[] = [
+  { time: '10:20', label: 'Medium 1/1',            run: () => runMediumBatch(1) },
+  { time: '10:30', label: 'FB Batch 1',            run: () => runFbBatch(1) },
+  { time: '10:35', label: 'Pearltrees 1/3',        run: () => runPearltreesBatch(1) },
+  { time: '10:40', label: 'Velog 1/2',             run: () => runVelogBatch(1) },
+  { time: '10:45', label: 'Linkmate 1/2',          run: () => runLinkmateBatch(1) },
+  { time: '11:00', label: 'Calisthenics 1/2',      run: () => runCalisthenicsNBatch(1) },
+  { time: '11:05', label: 'PdfHost 1/3',           run: () => runPdfhostBatch(1) },
+  { time: '11:10', label: 'Google Sites 1/3',      run: () => runGoogleSiteBatch(1) },
+  { time: '11:15', label: 'HackMD 1/2',            run: () => runHackmdBatch(1) },
+  { time: '11:20', label: 'Telegraph 1/2',         run: () => runTelegraphBatch(1) },
+  { time: '11:30', label: 'LI Batch 1',            run: () => runLiBatch(undefined, 1) },
+  { time: '11:35', label: 'Instapaper 1/3',        run: () => runInstapaperBatch(1) },
+  { time: '11:45', label: 'Blogger 1/2',           run: () => runBloggerBatch(1) },
+  { time: '12:00', label: 'FB Batch 2',            run: () => runFbBatch(2) },
+  { time: '12:05', label: 'Raindrop 1/3',          run: () => runRaindropBatch(1) },
+  { time: '12:10', label: '4shared 1/2',           run: () => runFourSharedBatch(1) },
+  { time: '12:15', label: 'X Batch 1',             run: () => runXBatch(1) },
+  { time: '12:30', label: 'Notion 1/2',            run: () => runNotionBatch(1) },
+  { time: '12:35', label: 'Tumblr 1/2',            run: () => runTumblrBatch(1) },
+  { time: '12:45', label: 'Dev.to 1/2',            run: () => runDevtoBatch(1) },
+  { time: '13:00', label: 'Coda 1/1',              run: () => runCodaBatch(1) },
+  { time: '13:05', label: 'Pearltrees 2/3',        run: () => runPearltreesBatch(2) },
+  { time: '13:15', label: 'LinkedIn Pulse 1/1',    run: () => runLinkedinPulseBatch(1) },
+  { time: '13:20', label: 'Google Sites 2/3',      run: () => runGoogleSiteBatch(2) },
+  { time: '13:30', label: 'WordPress 1/1',         run: () => runWordpressBatch(1) },
+  { time: '13:35', label: 'PdfHost 2/3',           run: () => runPdfhostBatch(2) },
+  { time: '13:45', label: 'FB Batch 3',            run: () => runFbBatch(3) },
+  { time: '13:50', label: 'Telegraph 2/2',         run: () => runTelegraphBatch(2) },
+  { time: '14:00', label: 'LI Batch 2',            run: () => runLiBatch(undefined, 2) },
+  { time: '14:05', label: 'Instapaper 2/3',        run: () => runInstapaperBatch(2) },
+  { time: '14:15', label: 'Linkmate 2/2',          run: () => runLinkmateBatch(2) },
+  { time: '14:20', label: 'Velog 2/2',             run: () => runVelogBatch(2) },
+  { time: '14:30', label: 'Calisthenics 2/2',      run: () => runCalisthenicsNBatch(2) },
+  { time: '14:35', label: 'Raindrop 2/3',          run: () => runRaindropBatch(2) },
+  { time: '14:45', label: 'X Batch 2',             run: () => runXBatch(2) },
+  { time: '15:00', label: 'HackMD 2/2',            run: () => runHackmdBatch(2) },
+  { time: '15:05', label: 'Tumblr 2/2',            run: () => runTumblrBatch(2) },
+  { time: '15:15', label: 'Group4',                run: runGroup('Group4') },
+  { time: '15:30', label: 'FB Batch 4',            run: () => runFbBatch(4) },
+  { time: '15:35', label: 'Pearltrees 3/3',        run: () => runPearltreesBatch(3) },
+  { time: '15:45', label: 'Group4b',               run: runGroup('Group4b') },
+  { time: '16:00', label: 'Blogger 2/2',           run: () => runBloggerBatch(2) },
+  { time: '16:05', label: 'PdfHost 3/3',           run: () => runPdfhostBatch(3) },
+  { time: '16:10', label: 'Google Sites 3/3',      run: () => runGoogleSiteBatch(3) },
+  { time: '16:15', label: 'Notion 2/2',            run: () => runNotionBatch(2) },
+  { time: '16:20', label: '4shared 2/2',           run: () => runFourSharedBatch(2) },
+  { time: '16:30', label: 'Dev.to 2/2',            run: () => runDevtoBatch(2) },
+  { time: '16:35', label: 'Instapaper 3/3',        run: () => runInstapaperBatch(3) },
+  { time: '16:45', label: 'LI Batch 3',            run: () => runLiBatch(undefined, 3) },
+  { time: '17:00', label: 'FB Batch 5',            run: () => runFbBatch(5) },
+  { time: '17:05', label: 'Raindrop 3/3',          run: () => runRaindropBatch(3) },
+  { time: '17:15', label: 'WordPress 2/2',         run: () => runWordpressBatch(2) },
+  { time: '17:30', label: 'Calisthenics 3/3',      run: () => runCalisthenicsNBatch(3) },
+  { time: '17:45', label: 'Linkmate 3/3',          run: () => runLinkmateBatch(3) },
+  { time: '18:20', label: 'Daily Posting Summary', run: runDailyPostingSummary },
+];
+
 export async function startCoordinatorDaemon(): Promise<void> {
   const tz = 'Asia/Kolkata';
 
-  // ── 11:00 — X-1, FB-1, GS-1 ───────────────────────────────────────────────
-  cron.schedule('0 11 * * *',  wrap('X Batch 1',           () => runXBatch(1)),          { timezone: tz });
-  cron.schedule('0 11 * * *',  wrap('FB Batch 1',          () => runFbBatch(1)),         { timezone: tz });
-  cron.schedule('0 11 * * *',  wrap('Google Sites Batch 1',() => runGoogleSiteBatch(1)), { timezone: tz });
 
-  // ── 11:15 — HackMD-1 ──────────────────────────────────────────────────────
-  cron.schedule('15 11 * * *', wrap('HackMD Batch 1',      () => runHackmdBatch(1)),     { timezone: tz });
+  for (const slot of DAILY_SLOTS) {
+    cron.schedule(cronExprFor(slot.time), () => { runSlotOnce(slot).catch((e: any) => console.error(`[${slot.label}] Error: ${e.message}`)); }, { timezone: tz });
+  }
 
-  // ── 11:20 — LI-1  [PROTECTED 11:20–11:40] ─────────────────────────────────
-  cron.schedule('20 11 * * *', wrap('LI Batch 1',          () => runLiBatch(undefined, 1)), { timezone: tz });
+  // Liveness heartbeat (watched by supervisor.ts) + catch-up sweeper for slots
+  // missed while the process was blocked, asleep, or not running.
+  startHeartbeat();
+  seedIfOldDaemonRanToday(DAILY_SLOTS);
+  startCatchUpSweeper(DAILY_SLOTS);
 
-  // ── 11:40 — X-2, Linkmate-1  (first slot after LI-1 window) ──────────────
-  cron.schedule('40 11 * * *', wrap('X Batch 2',           () => runXBatch(2)),          { timezone: tz });
-  cron.schedule('40 11 * * *', wrap('Linkmate Batch 1',    () => runLinkmateBatch(1)),   { timezone: tz });
-
-  // ── 11:55 — Guffiz-1 ──────────────────────────────────────────────────────
-  cron.schedule('55 11 * * *', wrap('Guffiz Batch 1',      () => runGuffizBatch(1)),     { timezone: tz });
-
-  // ── 12:10 — FB-2, Calisthenics-1 ──────────────────────────────────────────
-  cron.schedule('10 12 * * *', wrap('FB Batch 2',          () => runFbBatch(2)),         { timezone: tz });
-  cron.schedule('10 12 * * *', wrap('Calisthenics Batch 1',() => runCalisthenicsNBatch(1)), { timezone: tz });
-
-  // ── 12:25 — Substack-1 ────────────────────────────────────────────────────
-  cron.schedule('25 12 * * *', wrap('Substack Batch',      () => runSubstackBatch(1)),   { timezone: tz });
-
-  // ── 12:40 — Dev.to-1 ──────────────────────────────────────────────────────
-  cron.schedule('40 12 * * *', wrap('Dev.to Batch',        () => runDevtoBatch(1)),      { timezone: tz });
-
-  // ── 12:55 — LI Pulse-1  [PROTECTED 12:55–13:15] ───────────────────────────
-  cron.schedule('55 12 * * *', wrap('LinkedIn Pulse Batch',() => runLinkedinPulseBatch(1)), { timezone: tz });
-
-  // ── 13:15 — X-3, FB-3  (first slot after LI Pulse window) ────────────────
-  cron.schedule('15 13 * * *', wrap('X Batch 3',           () => runXBatch(3)),          { timezone: tz });
-  cron.schedule('15 13 * * *', wrap('FB Batch 3',          () => runFbBatch(3)),         { timezone: tz });
-
-  // ── 13:30 — LI-2  [PROTECTED 13:30–13:50] ─────────────────────────────────
-  cron.schedule('30 13 * * *', wrap('LI Batch 2',          () => runLiBatch(undefined, 2)), { timezone: tz });
-
-  // ── 13:50 — X-4, GS-2  (first slot after LI-2 window) ────────────────────
-  cron.schedule('50 13 * * *', wrap('X Batch 4',           () => runXBatch(4)),          { timezone: tz });
-  cron.schedule('50 13 * * *', wrap('Google Sites Batch 2',() => runGoogleSiteBatch(2)), { timezone: tz });
-
-  // ── 14:05 — HackMD-2 ──────────────────────────────────────────────────────
-  cron.schedule('5 14 * * *',  wrap('HackMD Batch 2',      () => runHackmdBatch(2)),     { timezone: tz });
-
-  // ── 14:15 — Medium-1  [PROTECTED 14:15–14:35] ─────────────────────────────
-  cron.schedule('15 14 * * *', wrap('Medium Batch',        () => runMediumBatch(1)),     { timezone: tz });
-
-  // ── 14:35 — X-5, Linkmate-2  (first slot after Medium window) ────────────
-  cron.schedule('35 14 * * *', wrap('X Batch 5',           () => runXBatch(5)),          { timezone: tz });
-  cron.schedule('35 14 * * *', wrap('Linkmate Batch 2',    () => runLinkmateBatch(2)),   { timezone: tz });
-
-  // ── 14:50 — Guffiz-2, FB-4 ────────────────────────────────────────────────
-  cron.schedule('50 14 * * *', wrap('Guffiz Batch 2',      () => runGuffizBatch(2)),     { timezone: tz });
-  cron.schedule('50 14 * * *', wrap('FB Batch 4',          () => runFbBatch(4)),         { timezone: tz });
-
-  // ── 15:05 — Calisthenics-2 ────────────────────────────────────────────────
-  cron.schedule('5 15 * * *',  wrap('Calisthenics Batch 2',() => runCalisthenicsNBatch(2)), { timezone: tz });
-
-  // ── 15:15 — LI-3  [PROTECTED 15:15–15:35] ─────────────────────────────────
-  cron.schedule('15 15 * * *', wrap('LI Batch 3',          () => runLiBatch(undefined, 3)), { timezone: tz });
-
-  // ── 15:35 — X-6, FB-5  (first slot after LI-3 window) ────────────────────
-  cron.schedule('35 15 * * *', wrap('X Batch 6',           () => runXBatch(6)),          { timezone: tz });
-  cron.schedule('35 15 * * *', wrap('FB Batch 5',          () => runFbBatch(5)),         { timezone: tz });
-
-  // ── 15:50 — X-7 ───────────────────────────────────────────────────────────
-  cron.schedule('50 15 * * *', wrap('X Batch 7',           () => runXBatch(7)),          { timezone: tz });
-
-  // ── 16:10 — X-8 ───────────────────────────────────────────────────────────
-  cron.schedule('10 16 * * *', wrap('X Batch 8',           () => runXBatch(8)),          { timezone: tz });
-
-  // ── 16:30 — X-9  (last batch — 90 min before 18:00 hard limit) ────────────
-  cron.schedule('30 16 * * *', wrap('X Batch 9',           () => runXBatch(9)),          { timezone: tz });
-
-  // ── Error monitor: every 3 minutes ───────────────────────────────────────────
-  cron.schedule('*/3 * * * *', async () => {
-    try {
-      const result = await runMonitorCycle();
-      if (result.newErrors > 0) {
-        console.log(`\n[${nowIst()}] Monitor: ${result.newErrors} error(s) — fixed: ${result.autoFixed}, human alerts: ${result.humanAlerts}, unknown: ${result.unknownErrors}`);
-        for (const line of result.summary) console.log(`   ${line}`);
-      }
-    } catch (err: any) {
-      console.warn(`[Monitor] cycle failed: ${err.message}`);
-    }
-  });
-
-  // ── Daily reset at midnight IST ────────────────────────────────────────────
+  // ── Daily reset at midnight IST ───────────────────────────────────────────
   cron.schedule('0 0 * * *', () => {
     console.log(`\n[${nowIst()}] Midnight — resetting daily batch counters`);
     resetBatchCounters();
   }, { timezone: tz });
 
-  // ── Weekly SERP recheck: Saturday 10 PM IST ────────────────────────────────
+  // ── Weekly SERP recheck: Saturday 10 PM IST ───────────────────────────────
   cron.schedule('0 22 * * 6', wrap('Weekly SERP Recheck', runWeeklySerpRecheck), { timezone: tz });
 
   // ── Sunday Examination: Move failed posts to end of sheet ─────────────────
   cron.schedule('0 10 * * 0', wrap('Sunday Failed Posts Examination', runSundayExamination), { timezone: tz });
 
-  // ── Print schedule ─────────────────────────────────────────────────────────
-  console.log('Coordinator Scheduler Started — all times IST, hard limit 11:00–18:00\n');
-  console.log('  Time  │ Batches firing');
-  console.log('  ──────┼─────────────────────────────────────────────');
-  console.log('  11:00 │ X-1, FB-1, Google Sites-1');
-  console.log('  11:15 │ HackMD-1');
-  console.log('  11:20 │ LI-1  [PROTECTED 20 min — nothing until 11:40]');
-  console.log('  11:40 │ X-2, Linkmate-1');
-  console.log('  11:55 │ Guffiz-1');
-  console.log('  12:10 │ FB-2, Calisthenics-1');
-  console.log('  12:25 │ Substack-1');
-  console.log('  12:40 │ Dev.to-1');
-  console.log('  12:55 │ LI Pulse-1  [PROTECTED 20 min — nothing until 13:15]');
-  console.log('  13:15 │ X-3, FB-3');
-  console.log('  13:30 │ LI-2  [PROTECTED 20 min — nothing until 13:50]');
-  console.log('  13:50 │ X-4, Google Sites-2');
-  console.log('  14:05 │ HackMD-2');
-  console.log('  14:15 │ Medium-1  [PROTECTED 20 min — nothing until 14:35]');
-  console.log('  14:35 │ X-5, Linkmate-2');
-  console.log('  14:50 │ Guffiz-2, FB-4');
-  console.log('  15:05 │ Calisthenics-2');
-  console.log('  15:15 │ LI-3  [PROTECTED 20 min — nothing until 15:35]');
-  console.log('  15:35 │ X-6, FB-5');
-  console.log('  15:50 │ X-7');
-  console.log('  16:10 │ X-8');
-  console.log('  16:30 │ X-9  (last batch)');
-  console.log('  ──────┼─────────────────────────────────────────────');
-  console.log('  Posts │ X:135  FB:75  LI:45  GS:30  HackMD:30');
-  console.log('        │ Linkmate:30  Guffiz:30  Calisthenics:30');
-  console.log('        │ Substack:15  Dev.to:15  LI Pulse:15  Medium:15');
-  console.log('        │ Total: ~465 posts/day\n');
+  // ── Print schedule ────────────────────────────────────────────────────────
+  console.log('Coordinator Scheduler Started — New Logic 3-slot independent posting, 10:30–18:00 IST\n');
+  console.log('  Time  │ Batch');
+  console.log('  ──────┼─────────────────────────────────────────────────────');
+  console.log('  10:30 │ FB-1');
+  console.log('  10:45 │ Linkmate        (1/2, slot 1)');
+  console.log('  11:00 │ Calisthenics    (1/2, slot 2)');
+  console.log('  11:15 │ HackMD          (1/2, slot 3)');
+  console.log('  11:30 │ LI-1            [PROTECTED → next at 11:45]');
+  console.log('  11:45 │ Blogger         (1/2, slot 1)');
+  console.log('  12:00 │ FB-2');
+  console.log('  12:15 │ X-1');
+  console.log('  12:30 │ Notion          (1/2, slot 2)');
+  console.log('  12:45 │ Dev.to          (1/2, slot 3)');
+  console.log('  13:00 │ Coda            (1/1, slot 1)');
+  console.log('  13:15 │ LinkedIn Pulse  (1/1, slot 2)');
+  console.log('  13:30 │ WordPress       (1/1, slot 3)');
+  console.log('  13:45 │ FB-3');
+  console.log('  14:00 │ LI-2            [PROTECTED → next at 14:15]');
+  console.log('  14:15 │ Linkmate        (2/2, slot 1)');
+  console.log('  14:30 │ Calisthenics    (2/2, slot 2)');
+  console.log('  14:45 │ X-2');
+  console.log('  15:00 │ HackMD          (2/2, slot 3)');
+  console.log('  15:15 │ Group4 [PROTECTED → next at 15:30] — claims rows/assigns New Name only, no posting');
+  console.log('  15:30 │ FB-4');
+  console.log('  15:45 │ Group4b — claims rows/assigns New Name only, no posting');
+  console.log('  16:00 │ Blogger         (2/2, slot 1)');
+  console.log('  16:15 │ Notion          (2/2, slot 2)');
+  console.log('  16:30 │ Dev.to          (2/2, slot 3)');
+  console.log('  16:45 │ LI-3            [PROTECTED → next at 17:00]');
+  console.log('  17:00 │ FB-5');
+  console.log('  17:05 │ Raindrop        (3/3)');
+  console.log('  17:15 │ WordPress       (2/2, slot 3)');
+  console.log('  17:30 │ Calisthenics    (3/3, slot 2)');
+  console.log('  17:45 │ Linkmate        (3/3, slot 1)');
+  console.log('  18:20 │ Daily Posting Summary (report + Algo Reports!F write)');
+  console.log('  ──────┼─────────────────────────────────────────────────────');
+  console.log('  New SBM/PPT-PDF platforms (:05/:35 offsets, interleaved with the grid above):');
+  console.log('  10:35 Pearltrees 1/3 │ 11:05 PdfHost 1/3 │ 11:20 Telegraph 1/2 │ 11:35 Instapaper 1/3 │ 12:05 Raindrop 1/3 │ 12:35 Tumblr 1/2');
+  console.log('  13:05 Pearltrees 2/3 │ 13:35 PdfHost 2/3 │ 13:50 Telegraph 2/2 │ 14:05 Instapaper 2/3 │ 14:35 Raindrop 2/3 │ 15:05 Tumblr 2/2');
+  console.log('  15:35 Pearltrees 3/3 │ 16:05 PdfHost 3/3 │ 16:35 Instapaper 3/3 │ 17:05 Raindrop 3/3');
+  console.log('  ──────┼─────────────────────────────────────────────────────');
+  console.log('  Medium/Velog (slot 1), Google Sites/PdfHost (slot 2), 4shared (slot 3) — :10/:20/:25/:40/:50 offsets:');
+  console.log('  10:20 Medium 1/1      │ 10:40 Velog 1/2       │ 11:10 Google Sites 1/3');
+  console.log('  12:10 4shared 1/2     │ 13:20 Google Sites 2/3 │ 14:20 Velog 2/2');
+  console.log('  16:10 Google Sites 3/3 │ 16:20 4shared 2/2');
+  console.log('  ──────┼─────────────────────────────────────────────────────');
+  console.log('  Slot 1: Linkmate, Blogger, Coda, Medium, Velog');
+  console.log('  Slot 2: Calisthenics, Notion, LinkedIn Pulse, Google Sites, PdfHost');
+  console.log('  Slot 3: HackMD, WordPress, Dev.to, 4shared');
+  console.log('  Each platform independently claims the next "New Logic" row where its own slot is still empty.\n');
 
-  const istHour = parseInt(new Date().toLocaleString('en-IN', {
-    timeZone: 'Asia/Kolkata', hour: 'numeric', hour12: false,
-  }));
-  if (istHour >= 11 && istHour < 18) {
+  const now = new Date();
+  const istMin = parseInt(now.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', hour: 'numeric', minute: 'numeric', hour12: false }).replace(':', '')) || 0;
+  // window: 10:30 (1030) → 18:00 (1800)
+  if (istMin >= 1030 && istMin <= 1800) {
     console.log(`Now: ${nowIst()} — posting window OPEN`);
   } else {
-    console.log(`Now: ${nowIst()} — posting window CLOSED (opens 11:00 IST)`);
+    console.log(`Now: ${nowIst()} — posting window CLOSED (opens 10:30 IST)`);
   }
 }
 

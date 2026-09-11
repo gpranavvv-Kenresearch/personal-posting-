@@ -49,16 +49,20 @@ function normalizeImgTags(html: string, ctx: BlogSanityContext): { html: string;
 }
 
 // ---------------------------------------------------------------------------
-// Rule 2 — remove the "By Ken Research" byline paragraph, wherever it lands.
+// Rule 2 — remove a byline paragraph attributing the article to Ken Research,
+// wherever it lands (e.g. "By Ken Research", "Market analysis by Ken
+// Research."). Matched against the WHOLE paragraph's stripped text, then the
+// entire <p> is dropped — never a mid-sentence substring removal, which used
+// to leave a broken fragment like "<p>Market analysis .</p>" behind when the
+// byline text didn't exactly match "By Ken Research" verbatim.
 // ---------------------------------------------------------------------------
+const BYLINE_TEXT_RE = /^(?:by|market\s+analysis\s+by|research\s+by|analysis\s+by)\s+ken\s+research\.?$/i;
+
 function removeByline(html: string): { html: string; changed: boolean } {
   let changed = false;
-  let out = html.replace(/<p>\s*<em>\s*By\s+Ken\s+Research\s*<\/em>\s*<\/p>\s*/gi, () => {
-    changed = true;
-    return '';
-  });
-  // Fallback: a bare <em>By Ken Research</em> not wrapped in its own <p>.
-  out = out.replace(/<em>\s*By\s+Ken\s+Research\s*<\/em>/gi, () => {
+  const out = html.replace(/<p>([\s\S]*?)<\/p>\s*/gi, (whole, inner) => {
+    const text = inner.replace(/<[^>]+>/g, '').trim();
+    if (!BYLINE_TEXT_RE.test(text)) return whole;
     changed = true;
     return '';
   });

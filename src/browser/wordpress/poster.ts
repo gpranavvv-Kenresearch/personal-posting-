@@ -5,6 +5,22 @@ import { injectUTM, UTM_PARAMS } from '../../utils/utm.js';
 const CLICK_DELAY = 2000;
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
+async function gotoWithRetry(page: Page, url: string, expectedDomain: string, retries = 3): Promise<void> {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    } catch { /* timeout — check URL anyway */ }
+    const landed = page.url();
+    if (landed !== 'about:blank' && landed !== '' && landed.includes(expectedDomain)) return;
+    console.log(`   ⚠️ Navigation to ${url} landed on "${landed}" (attempt ${attempt}/${retries}) — retrying...`);
+    await sleep(3000);
+  }
+  const final = page.url();
+  if (final === 'about:blank' || final === '' || !final.includes(expectedDomain)) {
+    throw new Error(`Failed to navigate to ${url} after ${retries} attempts. Landed on: ${final}`);
+  }
+}
+
 function jsClick(page: Page, selector: string) {
   return page.evaluate((sel) => {
     const el = document.querySelector(sel);
@@ -40,25 +56,74 @@ export async function postToWordpress(
   // Inject WordPress UTM into all kenresearch.com links
   htmlContent = injectUTM(htmlContent, UTM_PARAMS.WordPress);
 
-  // Navigate to blog homepage (admin bar lives here)
-  console.log(`   Navigating to blog: ${blogUrl}`);
-  await page.goto(blogUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+  // Navigate directly to post-new.php if the account has a specific blog domain,
+  // otherwise fall back to homepage + New Post click.
+  const isSpecificBlog = blogUrl !== 'https://wordpress.com' && blogUrl.includes('wordpress.com');
+  if (isSpecificBlog) {
+    const editorUrl = `${blogUrl}/wp-admin/post-new.php?post_type=post&`;
+    console.log(`   Navigating directly to editor: ${editorUrl}`);
+    await gotoWithRetry(page, editorUrl, 'wordpress.com');
+    // If redirected to login, wait for user / session to kick in
+    if (page.url().includes('/log-in') || page.url().includes('/wp-login')) {
+      console.log('   ⏳ Detected login redirect — waiting 20 seconds for session...');
+      await sleep(20000);
+      await gotoWithRetry(page, editorUrl, 'wordpress.com');
+    }
+    console.log(`   ✅ Editor URL: ${page.url()}`);
+    console.log('   ⏳ Waiting 6 seconds for editor to fully load...');
+    await sleep(6000);
+  } else {
+    // Navigate to blog homepage (admin bar lives here)
+    console.log(`   Navigating to blog: ${blogUrl}`);
+    await gotoWithRetry(page, blogUrl, 'wordpress.com');
 
-  // Step 1: If landed on login page, click Continue
-  if (page.url().includes('/log-in')) {
-    console.log('   Detected login page — clicking Continue...');
-    await sleep(CLICK_DELAY);
-    await jsClick(page, 'a.continue-as-user__continue-button');
-    await sleep(5000);
-    console.log('   ✅ Clicked Continue');
+    // Step 1: If landed on login page, click Continue
+    if (page.url().includes('/log-in')) {
+      console.log('   Detected login page — clicking Continue...');
+      await sleep(CLICK_DELAY);
+      await jsClick(page, 'a.continue-as-user__continue-button');
+      await sleep(5000);
+      console.log('   ✅ Clicked Continue');
+    }
+
+    // Step 2: Click "New Post" in admin bar — retry until URL slug shows post-new.php
+    console.log('   Clicking New Post in admin bar...');
+    const NEW_POST_SELECTORS = [
+      'a[href*="/wp-admin/post-new.php"]',
+      'a[href="/wp-admin/post-new.php?post_type=post"]',
+      'a.ab-item[href*="post-new.php"]',
+    ];
+    const MAX_NEW_POST_TRIES = 5;
+    let editorOpen = false;
+    for (let attempt = 1; attempt <= MAX_NEW_POST_TRIES; attempt++) {
+      await sleep(CLICK_DELAY);
+      let clicked = false;
+      for (const sel of NEW_POST_SELECTORS) {
+        const exists = await page.$(sel).then(el => !!el).catch(() => false);
+        if (exists) {
+          await jsClick(page, sel);
+          clicked = true;
+          break;
+        }
+      }
+      if (!clicked) {
+        console.log(`   ⚠️ New Post link not found (try ${attempt}/${MAX_NEW_POST_TRIES})`);
+      }
+      try {
+        await page.waitForURL(/\/wp-admin\/post-new\.php/, { timeout: 8000 });
+        editorOpen = true;
+        console.log(`   ✅ Editor URL reached on try ${attempt}: ${page.url()}`);
+        break;
+      } catch {
+        console.log(`   ⚠️ URL still ${page.url()} — retrying New Post click (${attempt}/${MAX_NEW_POST_TRIES})`);
+      }
+    }
+    if (!editorOpen) {
+      throw new Error(`Failed to open New Post editor after ${MAX_NEW_POST_TRIES} tries. Current URL: ${page.url()}`);
+    }
+    console.log('   ⏳ Waiting 6 seconds for editor to fully load...');
+    await sleep(6000);
   }
-
-  // Step 2: Click "New Post" in admin bar
-  console.log('   Clicking New Post in admin bar...');
-  await sleep(CLICK_DELAY);
-  await jsClick(page, 'a[href="/wp-admin/post-new.php?post_type=post"]');
-  console.log('   ✅ Clicked New Post — waiting 10 seconds for editor...');
-  await sleep(10000);
 
   // Step 3: Click title field and type
   console.log('   Typing title...');
@@ -123,23 +188,58 @@ export async function postToWordpress(
   console.log('   ✅ Tags added — waiting 5 seconds...');
   await sleep(5000);
 
-  // Step 10: Click "Copy" button and read URL from clipboard
-  console.log('   Clicking Copy button...');
-  let postUrl = page.url();
-  await sleep(CLICK_DELAY);
-  await jsClick(page, 'button.components-button.is-next-40px-default-size.is-secondary');
-  await sleep(1000);
+  // Step 10: Get post URL — try "View Post" link first, then Copy button + clipboard
+  console.log('   Waiting 7 seconds for post-publish panel...');
+  await sleep(7000);
+
+  let postUrl = '';
+
+  // Primary: grab href from "View Post" link in post-publish panel
   try {
-    postUrl = await page.evaluate(() => navigator.clipboard.readText());
-  } catch {
+    const viewPostLink = await page.$('a.post-publish-panel__postpublish-buttons-link, a[href*="wordpress.com"]:has-text("View Post"), a.components-button[href*="://"]:has-text("View Post")');
+    if (viewPostLink) {
+      postUrl = (await viewPostLink.getAttribute('href')) || '';
+      console.log(`   ✅ Post URL from View Post link: ${postUrl}`);
+    }
+  } catch { /* try next method */ }
+
+  // Secondary: Copy button + clipboard
+  if (!postUrl || postUrl === 'about:blank') {
+    console.log('   Clicking Copy button...');
+    const copyClicked = await page.evaluate(() => {
+      const btns = Array.from(document.querySelectorAll('button.components-button'));
+      const target = btns.find(b => (b.textContent || '').trim().toLowerCase() === 'copy') as HTMLElement | undefined;
+      if (target) { target.click(); return true; }
+      return false;
+    });
+    if (!copyClicked) {
+      await jsClick(page, 'button.components-button.is-next-40px-default-size.is-secondary');
+    }
+    await sleep(1000);
     try {
-      const { execSync } = await import('child_process');
-      postUrl = execSync('powershell -command Get-Clipboard').toString().trim();
+      postUrl = await page.evaluate(() => navigator.clipboard.readText());
     } catch {
-      postUrl = page.url();
+      try {
+        const { execSync } = await import('child_process');
+        postUrl = execSync('powershell -command Get-Clipboard', { timeout: 5000 }).toString().trim();
+      } catch { /* will fall through to DOM search */ }
     }
   }
-  console.log(`   ✅ Post URL copied: ${postUrl}`);
+
+  // Tertiary: search all links in page for a wordpress.com post URL
+  if (!postUrl || postUrl === 'about:blank') {
+    try {
+      postUrl = await page.evaluate(() => {
+        const links = Array.from(document.querySelectorAll('a[href]')) as HTMLAnchorElement[];
+        const match = links.find(a => /wordpress\.com\/.+\/\d{4}\//.test(a.href) || /wordpress\.com\/p=/.test(a.href));
+        return match?.href || '';
+      });
+    } catch { /* ignore */ }
+  }
+
+  // Final fallback
+  if (!postUrl || postUrl === 'about:blank') postUrl = page.url();
+  console.log(`   ✅ Post URL: ${postUrl}`);
 
   return {
     success: true,

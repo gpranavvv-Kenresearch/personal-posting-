@@ -11,6 +11,13 @@ async function paste(page: Page, text: string): Promise<void> {
   await sleep(300);
 }
 
+async function highlightClick(page: Page, selector: string, opts?: { force?: boolean }): Promise<boolean> {
+  const el = await page.$(selector);
+  if (!el) return false;
+  await el.click({ force: opts?.force, delay: 150 }).catch(() => {});
+  return true;
+}
+
 export async function postToHackMD(
   page: Page,
   title: string,
@@ -33,14 +40,13 @@ export async function postToHackMD(
 
   console.log('   Navigating to HackMD new note...');
   await page.goto('https://hackmd.io/new', { waitUntil: 'domcontentloaded', timeout: 30000 });
-  // Wait for HackMD to redirect from /new to the actual note URL (e.g. /AbCdEf12)
   try {
     await page.waitForFunction(
       () => !window.location.href.includes('/new') && window.location.href !== 'https://hackmd.io/',
       { timeout: 10000 }
     );
-  } catch { /* some accounts may not redirect — fall back */ }
-  const noteUrl = page.url(); // capture BEFORE any clicks change the URL
+  } catch { /* fall back */ }
+  const noteUrl = page.url();
   console.log(`   Note URL captured: ${noteUrl}`);
   await sleep(3000);
 
@@ -72,18 +78,18 @@ export async function postToHackMD(
     }, markdown);
     await sleep(1000);
 
-    // Open note settings popup
+    // Open note settings
     console.log('   Opening note settings...');
-    await page.click("div[data-original-title='Note settings']");
+    await highlightClick(page, "div[data-original-title='Note settings']");
     await sleep(2000);
 
     try {
-      // Fill title in settings via paste
-      await page.click('input[placeholder="Untitled"]');
+      // Fill title
+      await highlightClick(page, 'input[placeholder="Untitled"]');
       await page.keyboard.press('Control+A');
       await paste(page, title);
 
-      // Fill description via paste — use row.description (column B), fallback to title
+      // Fill description
       const descText = (description || '').trim() || title;
       const descField = await page.$('textarea[placeholder*="What is the note about?"]');
       if (descField) {
@@ -92,66 +98,79 @@ export async function postToHackMD(
         await paste(page, descText);
       }
 
-      // Click Update button
+      // Click Update up to 3 times
       const updateBtn = await page.$('button.ui-meta-title-description-edit-submit');
       if (updateBtn) {
-        await sleep(2000);
-        await updateBtn.click();
-        console.log('   ✅ Settings updated');
+        await highlightClick(page, 'button.ui-meta-title-description-edit-submit');
+        console.log('   Clicked Update (1st)');
+        await sleep(800);
 
-        await sleep(2000);
-        try {
-          const discardBtn = await page.waitForSelector('button.bg-state-danger-bg-default', {
-            state: 'visible',
-            timeout: 8000,
-          });
-          if (discardBtn) {
-            await discardBtn.click();
-            console.log('   Discard dialog dismissed');
-            await sleep(2000);
-          }
-        } catch {
-          // No discard dialog — fine
-        }
-      }
-    } catch (e: any) {
-      console.warn('   ⚠️ Note settings popup step failed:', e.message);
-    }
-
-    // Close popup by clicking editor
-    try {
-      const editor = await page.$('.CodeMirror');
-      if (editor) {
-        const box = await editor.boundingBox();
-        if (box) {
-          await page.mouse.click(box.x + 50, box.y + 50);
-          await sleep(400);
-          await page.mouse.click(box.x + 50, box.y + 50);
+        const still2 = await updateBtn.isEnabled().catch(() => false);
+        if (still2) {
+          await highlightClick(page, 'button.ui-meta-title-description-edit-submit');
+          console.log('   Clicked Update (2nd)');
           await sleep(800);
         }
+
+        const still3 = await updateBtn.isEnabled().catch(() => false);
+        if (still3) {
+          await highlightClick(page, 'button.ui-meta-title-description-edit-submit');
+          console.log('   Clicked Update (3rd)');
+          await sleep(1000);
+
+          // Click CodeMirror to close modal
+          const editor = await page.$('.CodeMirror');
+          if (editor) {
+            const box = await editor.boundingBox();
+            if (box) {
+              console.log('   Clicking CodeMirror to close modal...');
+              await page.mouse.click(box.x + 50, box.y + 50);
+              await sleep(1500);
+            }
+          }
+
+          // Discard dialog — click via JS
+          const hasDiscard = await page.evaluate(() =>
+            !!Array.from(document.querySelectorAll('button')).find(b => b.textContent?.trim() === 'Discard')
+          ).catch(() => false);
+
+          if (hasDiscard) {
+            await page.evaluate(() => {
+              const btn = Array.from(document.querySelectorAll('button')).find(b => b.textContent?.trim() === 'Discard') as HTMLElement | null;
+              if (btn) btn.click();
+            }).catch(() => {});
+            console.log('   Discard clicked');
+            await sleep(1500);
+
+            // Click CodeMirror again to fully close
+            if (editor) {
+              const box = await editor.boundingBox();
+              if (box) {
+                console.log('   Clicking CodeMirror again...');
+                await page.mouse.click(box.x + 50, box.y + 50);
+                await sleep(1000);
+              }
+            }
+          }
+        }
+        console.log('   ✅ Settings done');
       }
-    } catch { /* non-critical */ }
+    } catch (e: any) {
+      console.warn('   ⚠️ Note settings step failed:', e.message);
+    }
 
     // Share → set visibility to Everyone
     console.log('   Setting visibility to Everyone...');
+    let publicUrl = noteUrl;
     try {
-      const shareBtn = await page.$('li.ui-share-button');
-      if (shareBtn) {
-        await shareBtn.click();
-        await sleep(1200);
-      }
+      await highlightClick(page, 'button.ui-sharing');
+      await sleep(1200);
 
-      const dropdownTrigger = await page.$('button.menuitem-dropdown-trigger');
-      if (dropdownTrigger) {
-        await dropdownTrigger.click();
-        await sleep(800);
-      }
+      await highlightClick(page, 'button.menuitem-dropdown-trigger');
+      await sleep(800);
 
-      const everyoneBtn = await page.$('a.ui-note-read-everyone');
-      if (everyoneBtn) {
-        await everyoneBtn.click();
-        await sleep(1000);
-      }
+      await highlightClick(page, 'a.ui-note-read-everyone');
+      await sleep(1000);
     } catch (e: any) {
       console.warn('   ⚠️ Visibility setting failed:', e.message);
     }
@@ -159,32 +178,30 @@ export async function postToHackMD(
     // Publish
     console.log('   Publishing note...');
     try {
-      const publishTab = await page.$('button.ui-publish-tab-link');
-      if (publishTab) {
-        await publishTab.click();
-        await sleep(1200);
-      }
+      await highlightClick(page, 'button.ui-publish-tab-link');
+      await sleep(1200);
 
-      const consentCheck = await page.$('input[type="checkbox"]');
-      if (consentCheck) {
-        await consentCheck.click();
-        await sleep(800);
-      }
+      await highlightClick(page, 'input[type="checkbox"]');
+      await sleep(800);
 
-      const finalPublish = await page.$('button.unpublish');
-      if (finalPublish) {
-        await finalPublish.click();
-        await sleep(1500);
+      await highlightClick(page, 'button.unpublish');
+      await sleep(1500);
+
+      // Grab public permalink from copy-link button
+      const copyBtn = await page.$('button.ui-share-copy');
+      if (copyBtn) {
+        const permalink = await copyBtn.getAttribute('data-permalink');
+        if (permalink) publicUrl = permalink;
       }
     } catch (e: any) {
       console.warn('   ⚠️ Publish step failed:', e.message);
     }
 
-    console.log(`   ✅ HackMD note posted: ${noteUrl}`);
+    console.log(`   ✅ HackMD note posted: ${publicUrl}`);
 
     return {
       success: true,
-      postUrl: noteUrl,
+      postUrl: publicUrl,
       postText: markdown,
       postedAt: new Date(),
     };

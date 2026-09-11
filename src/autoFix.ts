@@ -58,7 +58,6 @@ function resolveSessionDir(platform: string, accountName?: string): string | nul
     medium: 'medium',
     hackmd: 'hackmd',
     substack: 'substack',
-    guffiz: 'guffiz',
     linkmate: 'linkmate',
     googlesite: 'googlesite',
     devto: 'devto',

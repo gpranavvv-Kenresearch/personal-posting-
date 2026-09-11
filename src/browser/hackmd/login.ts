@@ -1,4 +1,4 @@
-import { chromium, BrowserContext, Page } from 'playwright';
+﻿import { chromium, BrowserContext, Page } from 'playwright';
 import path from 'path';
 import fs from 'fs';
 import 'dotenv/config';
@@ -102,19 +102,19 @@ export async function loginToHackMD(options?: {
 
   fs.mkdirSync(sessionDir, { recursive: true });
 
-  killChromeForProfile(sessionDir);
+  await killChromeForProfile(sessionDir);
 
   console.log(`   Using session folder: ${sessionDir}`);
   console.log('   Launching HackMD browser...');
 
   browserContext = await chromium.launchPersistentContext(sessionDir, {
-    headless: false,
+    headless: true,
     executablePath: chromePath,
     viewport: { width: 1280, height: 800 },
     slowMo: 120,
     ignoreDefaultArgs: ['--enable-automation'],
     args: [
-      '--no-sandbox',
+      '--start-minimized',
       '--window-size=1366,768',
       '--disable-blink-features=AutomationControlled',
       '--disable-renderer-backgrounding',
@@ -161,7 +161,7 @@ export async function loginToHackMD(options?: {
 
   // Attempt credential login
   console.log('   Session not valid — proceeding with credential login...');
-  await page.goto('https://hackmd.io/login', { waitUntil: 'domcontentloaded', timeout: 60000 });
+  await page.goto('https://hackmd.io/login', { waitUntil: 'domcontentloaded', timeout: 30000 });
   await sleep(1500);
 
   const emailInput = page.locator('input[name="email"]:visible, input[type="email"]:visible').first();
@@ -204,16 +204,7 @@ export async function loginToHackMD(options?: {
     return page;
   }
 
-  // Wait 20 seconds for manual intervention (CAPTCHA, etc.)
-  console.log('   ⚠️ Auto-login may have failed — waiting 20s for manual completion...');
-  await sleep(20000);
-
-  const finalCheck = await isAlreadyLoggedIn(page);
-  if (!finalCheck) {
-    await closeHackMDBrowser();
-    throw new Error(`Unable to log in to HackMD as ${email}. Please complete login manually.`);
-  }
-
-  console.log('   ✅ Login successful');
-  return page;
+  await closeHackMDBrowser();
+  throw new Error(`Unable to log in to HackMD as ${email}. Session expired — run save-hackmd-session manually.`);
 }
+

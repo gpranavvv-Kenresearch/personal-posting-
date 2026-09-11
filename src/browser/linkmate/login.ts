@@ -1,7 +1,8 @@
-import { chromium, BrowserContext, Page } from 'playwright';
+﻿import { chromium, BrowserContext, Page } from 'playwright';
 import path from 'path';
 import fs from 'fs';
 import 'dotenv/config';
+import { killChromeForProfile } from '../../utils/killChrome.js';
 
 const LINKMATE_ACCOUNTS_FILE = '.accounts/accounts-linkmate.json';
 const SESSION_ROOT = path.resolve('.sessions/linkmate');
@@ -68,19 +69,19 @@ export async function loginToLinkmate(options?: {
   if (!fs.existsSync(sessionDir)) {
     fs.mkdirSync(sessionDir, { recursive: true });
   }
+  await killChromeForProfile(sessionDir);
 
   console.log(`   Using session folder: ${sessionDir}`);
   console.log('   Launching Linkmate browser...');
 
   browserContext = await chromium.launchPersistentContext(sessionDir, {
-    headless: false,
+    headless: true,
     executablePath: chromePath,
     viewport: { width: 1366, height: 900 },
     slowMo: 50,
     ignoreDefaultArgs: ['--enable-automation'],
     args: [
-      '--no-sandbox',
-      '--start-maximized',
+      '--start-minimized',
       '--disable-blink-features=AutomationControlled',
       '--disable-renderer-backgrounding',
       '--disable-background-timer-throttling',
@@ -120,10 +121,10 @@ export async function loginToLinkmate(options?: {
     page = await browserContext.newPage();
   }
 
-  // Go to Linkmate — trust the saved session, no waiting
   console.log('   Navigating to Linkmate...');
   await page.goto('https://linkmate.mn.co/', { waitUntil: 'domcontentloaded', timeout: 30000 });
-  await sleep(3000);
+  // Wait for either the Create button (logged in) or sign-in link (not logged in)
+  await page.waitForSelector('a[title="Create"], a[href*="/sign_in"]', { timeout: 30000 }).catch(() => {});
 
   const url = page.url();
   if (url.includes('/sign_in') || url.includes('/login')) {
@@ -134,3 +135,4 @@ export async function loginToLinkmate(options?: {
   console.log(`   ✅ Session loaded for Linkmate (${options?.nickname ?? email})`);
   return page;
 }
+

@@ -1,12 +1,17 @@
 /**
  * hackmdBatchAgentNew.ts — HackMD Batch Posting Agent
- * Posts from HackMD accounts SEQUENTIALLY (reads account name from each row).
+ *
+ * Posting strategy (per account):
+ *   1. PRIMARY  — HackMD REST API (fast, no browser needed)
+ *   2. FALLBACK — Browser automation via saved Playwright session
  *
  * Content Format: HTML (from "Blog Content for all" column in sheet)
  * Updates sheet with: HackMD Post URL, status, batch label, last posted date
  */
 
 import { executeBrowserTool } from '../tools/browserTools.js';
+import { postToHackMDApi } from '../browser/hackmd/apiPoster.js';
+import { getHackMDAccounts } from '../browser/hackmd/login.js';
 import type { SheetRow } from '../sheets/sheets.js';
 
 export interface HackMDBatchResult {
@@ -17,6 +22,7 @@ export interface HackMDBatchResult {
     success: boolean;
     postUrl?: string;
     error?: string;
+    method?: 'api' | 'browser';
   }>;
 }
 
@@ -64,25 +70,58 @@ async function postToHackMDAccount(
   accountName: string,
   title: string,
   contentHtml: string,
-): Promise<{ success: boolean; postUrl?: string; error?: string }> {
-  try {
-    console.log(`   [postToHackMDAccount] Calling login_hackmd for: ${accountName}`);
-    const loginResult = await executeBrowserTool('login_hackmd', { nickname: accountName });
-    console.log(`   [postToHackMDAccount] Login result:`, loginResult);
+): Promise<{ success: boolean; postUrl?: string; error?: string; method?: 'api' | 'browser' }> {
 
-    if (!loginResult.success) {
-      return { success: false, error: loginResult.error || 'HackMD login failed' };
+  // ── 1. Try API first ────────────────────────────────────────────────────────
+  const apiKey = getApiKeyForAccount(accountName);
+
+  if (apiKey) {
+    console.log(`   [${accountName}] Trying HackMD API...`);
+    const apiResult = await postToHackMDApi(apiKey, title, contentHtml);
+
+    if (apiResult.success) {
+      console.log(`   [${accountName}] ✅ Posted via API`);
+      return { success: true, postUrl: apiResult.postUrl, method: 'api' };
     }
 
-    console.log(`   [postToHackMDAccount] Calling post_hackmd...`);
+    console.warn(`   [${accountName}] API failed: ${apiResult.error} — falling back to browser`);
+  } else {
+    console.warn(`   [${accountName}] No API key found — falling back to browser`);
+  }
+
+  // ── 2. Fallback: browser automation ────────────────────────────────────────
+  try {
+    console.log(`   [${accountName}] Trying browser session...`);
+    const loginResult = await executeBrowserTool('login_hackmd', { nickname: accountName });
+
+    if (!loginResult.success) {
+      return { success: false, error: loginResult.error || 'HackMD login failed', method: 'browser' };
+    }
+
     const postResult = await executeBrowserTool('post_hackmd', { title, htmlContent: contentHtml });
+    console.log(`   [${accountName}] ✅ Posted via browser`);
     return {
       success: postResult.success ?? false,
       postUrl: postResult.postUrl,
       error: postResult.error,
+      method: 'browser',
     };
   } catch (err: any) {
-    console.log(`   [postToHackMDAccount] Exception caught:`, err.message);
-    return { success: false, error: err.message };
+    console.error(`   [${accountName}] Browser fallback also failed: ${err.message}`);
+    return { success: false, error: err.message, method: 'browser' };
+  }
+}
+
+function getApiKeyForAccount(nickname: string): string | null {
+  try {
+    const accounts = getHackMDAccounts();
+    const account = accounts.find(
+      a => a.nickname?.toLowerCase() === nickname.toLowerCase()
+        || a.username?.toLowerCase() === nickname.toLowerCase()
+        || a.email?.toLowerCase() === nickname.toLowerCase(),
+    );
+    return (account as any)?.apiKey || null;
+  } catch {
+    return null;
   }
 }
