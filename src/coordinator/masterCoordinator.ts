@@ -75,7 +75,9 @@ import {
   getUnassignedRows,
   getUnassignedRowsAsSheetRows,
   getRowsNeedingSocialSlot,
+  getRowsNeedingLinkedinImagePost,
   saveSocialSlotResult,
+  saveLinkedinCarouselResult,
   getRowsForContinuousMediumPosting,
   getRowsForContinuousLinkmatePosting,
   getRowsForContinuousDevtoPosting,
@@ -125,6 +127,7 @@ import {
   saveUnifiedParagraphResult,
   saveSlotResult,
   savePdfPath,
+  appendRssExtractionRows,
 } from '../sheets/sheets.js';
 import { htmlToPdf, makeSlug } from '../utils/contentConverter.js';
 import { loginToPdfHost, closePdfHostBrowser } from '../browser/pdfhost/login.js';
@@ -281,12 +284,20 @@ function recordPost(platform: keyof Omit<BatchCounters, 'date'>): void {
   saveCounters(c);
 }
 
-/** Build the "Daily Post Count" table — same shape as the manual screenshot report. */
+// Platforms with no cron entry in scheduler-new.ts — not actually in use,
+// excluded from the summary even though their counter key still exists.
+const NOT_IN_CRON = new Set<keyof Omit<BatchCounters, 'date'>>([
+  'naver', 'paragraph', 'scribd', 'ameba', 'substack', 'patreon', 'note',
+]);
+
+/** Build the "Daily Post Count" table — same shape as the manual screenshot report.
+ *  Lists every platform actually in use (has a cron entry), including ones
+ *  with 0 posts today — not just the ones that happened to post. */
 function buildDailySummary(): { platform: string; posts: number }[] {
   const c = getCounters();
   return PLATFORM_LABELS
-    .map(([key, label]) => ({ platform: label, posts: c[key] ?? 0 }))
-    .filter(r => r.posts > 0);
+    .filter(([key]) => !NOT_IN_CRON.has(key))
+    .map(([key, label]) => ({ platform: label, posts: c[key] ?? 0 }));
 }
 
 /** Build the plain-text version of the summary — this exact text is what gets written to the sheet. */
@@ -320,6 +331,40 @@ export async function runDailyPostingSummary(): Promise<void> {
     await saveDailyPostingCount(dateIST, summaryText);
   } catch (err: any) {
     console.error(`   ❌ Failed to write daily posting count to Algo Reports: ${err.message}`);
+  }
+}
+
+/**
+ * Poll the Tech Team RSS feed (kenresearch.com/feed/newly-published.xml,
+ * confirmed live 2026-09-15) for newly published reports/articles/surveys/
+ * POVs/case studies, and append genuinely new ones to the raw "RSS
+ * Extraction" tab — a staging landing zone only. Feeding qualifying rows
+ * from there into Social Media / New Logic is separate logic, not yet
+ * built — see PRD_RSS_Content_Distribution.md. Dedup and cron survivability
+ * are handled inside runRssReportWatcher() (shared seen-store +
+ * since=<lastPoll>); this wrapper only needs to catch+log so one bad poll
+ * never takes the daemon down.
+ */
+export async function runReportDiscoveryBatch(): Promise<void> {
+  try {
+    const { runRssReportWatcher } = await import('../reportDiscovery/watcher.js');
+    const result = await runRssReportWatcher();
+    if (result.new.length > 0) {
+      const rows = result.new.map(item => ({
+        title: item.title,
+        url: item.url,
+        type: item.type,
+        region: item.region,
+        pubDate: item.date,
+        rawCategory: item.rawCategory,
+        guid: item.guid,
+        description: item.description,
+      }));
+      const appended = await appendRssExtractionRows(rows);
+      console.log(`   📡 [Report Discovery] Appended ${appended} new item(s) to the RSS Extraction tab.`);
+    }
+  } catch (err: any) {
+    console.error(`   ❌ [Report Discovery] Failed: ${err.message}`);
   }
 }
 
@@ -1164,7 +1209,15 @@ export async function runFourSharedBatch(batchNum: number = 1): Promise<void> {
  * Run LI batch: pick rows → SEO check → generate LI post → post → save all
  */
 export async function runLiBatch(options?: { manual?: boolean }, batchNum: number = 1): Promise<void> {
-  const rows = await getRowsNeedingSocialSlot(1, 15);
+  // Image-post rows come from a dedicated query — eligible when "Images URL"
+  // (col E) has a path AND "LinkedinCrousel" (col F) is still empty (that
+  // column filling in on success is what marks a row done, so it can't be
+  // re-picked). These must finish first, before any normal text posts.
+  const imageRows = await getRowsNeedingLinkedinImagePost(15);
+  const normalRows = await getRowsNeedingSocialSlot(1, 15);
+
+  const imageRowIndexes = new Set(imageRows.map(r => r.rowIndex));
+  const rows = [...imageRows, ...normalRows.filter(r => !imageRowIndexes.has(r.rowIndex))];
 
   if (rows.length === 0) {
     console.log('[LI BATCH] No rows available');
@@ -1217,33 +1270,44 @@ export async function runLiBatch(options?: { manual?: boolean }, batchNum: numbe
       liPost = injectUTM(liPost, UTM_PARAMS.LinkedIn);
       row.linkedinPost = liPost;
 
-      // 4. Post to LI — carousel if Images URL present, else normal
-      const pdfPath = (row.imagesUrl || '').trim();
-      console.log(`    Posting to LI (account: ${row.name})${pdfPath ? ' [CAROUSEL]' : ''}...`);
-      const postResult = pdfPath
-        ? await postToLiAccountCarousel(row.name, liPost, pdfPath)
+      // 4. Post to LI — image post if a locally-saved image path is present
+      // (column E / "Images URL"), else the normal text post. The two paths
+      // write their result URL to different places: normal → Social URL
+      // slot (as always), image → the "LinkedinCarousel" column (F).
+      const imagePath = (row.imagesUrl || '').trim();
+      console.log(`    Posting to LI (account: ${row.name})${imagePath ? ' [IMAGE]' : ''}...`);
+      const postResult = imagePath
+        ? await postToLiAccountImage(row.name, liPost, imagePath)
         : await postToLiAccount(row.name, liPost);
 
       if (postResult.success) {
         liPost = postResult.postText || liPost;
         row.linkedinPost = liPost;
-        await saveLiBatchResult(row, {
-          liPost,
-          liPostUrl: postResult.postUrl || '',
-          liStatus: 'Posted',
-          liBatch: batchLabel,
-        });
+        if (imagePath) {
+          await saveLinkedinCarouselResult(row.rowIndex, { postUrl: postResult.postUrl || '', status: 'Posted' });
+        } else {
+          await saveLiBatchResult(row, {
+            liPost,
+            liPostUrl: postResult.postUrl || '',
+            liStatus: 'Posted',
+            liBatch: batchLabel,
+          });
+        }
         recordPost('li');
         console.log(`    ✅ Posted → ${postResult.postUrl}`);
         posted++;
       } else {
-        await saveLiBatchResult(row, {
-          liPost,
-          liPostUrl: '',
-          liStatus: 'Failed',
-          liBatch: row.liBatch || '',
-          liError: postResult.error,
-        });
+        if (imagePath) {
+          await saveLinkedinCarouselResult(row.rowIndex, { postUrl: '', status: 'Failed', error: postResult.error });
+        } else {
+          await saveLiBatchResult(row, {
+            liPost,
+            liPostUrl: '',
+            liStatus: 'Failed',
+            liBatch: row.liBatch || '',
+            liError: postResult.error,
+          });
+        }
         console.log(`    ❌ Failed: ${postResult.error}`);
         failed++;
       }
@@ -1254,13 +1318,17 @@ export async function runLiBatch(options?: { manual?: boolean }, batchNum: numbe
       await applyFix(kbEntry, { platform: 'linkedin', accountName: row.name, rowIndex: row.rowIndex });
       console.error(`  ❌ Row ${row.rowIndex} [${kbEntry.classification}]: ${err.message}`);
       try {
-        await saveLiBatchResult(row, {
-          liPost: row.linkedinPost || '',
-          liPostUrl: '',
-          liStatus: 'Error',
-          liBatch: row.liBatch || '',
-          liError: err.message,
-        });
+        if ((row.imagesUrl || '').trim()) {
+          await saveLinkedinCarouselResult(row.rowIndex, { postUrl: '', status: 'Error', error: err.message });
+        } else {
+          await saveLiBatchResult(row, {
+            liPost: row.linkedinPost || '',
+            liPostUrl: '',
+            liStatus: 'Error',
+            liBatch: row.liBatch || '',
+            liError: err.message,
+          });
+        }
       } catch (saveErr: any) {
         console.error(`  ⚠️ Row ${row.rowIndex} SHEET SAVE ALSO FAILED: ${saveErr.message}`);
       }
@@ -1304,7 +1372,8 @@ async function postToLiAccount(accountName: string, postText: string): Promise<{
   }
 }
 
-async function postToLiAccountCarousel(accountName: string, postText: string, pdfPath: string): Promise<{
+// Helper: Post to single LI account with a single locally-saved image
+async function postToLiAccountImage(accountName: string, postText: string, imagePath: string): Promise<{
   success: boolean;
   postUrl?: string;
   postText?: string;
@@ -1321,8 +1390,8 @@ async function postToLiAccountCarousel(accountName: string, postText: string, pd
     }
 
     const postResult = await withTimeout(
-      executeBrowserTool('post_linkedin_carousel', { nickname: accountName, postText, pdfPath }),
-      3 * 60 * 1000, `LI carousel post:${accountName}`,
+      executeBrowserTool('post_linkedin_image', { nickname: accountName, postText, imagePath }),
+      3 * 60 * 1000, `LI image post:${accountName}`,
       () => closeLiSession(accountName)
     );
     return {
@@ -3081,9 +3150,16 @@ export async function runRetryRow(rowIndex: number, platform: string): Promise<v
           liPost = await generateLiPost({ url: row.targetUrl, title: row.title, seoRanking: 1, priority: 'P1' });
         }
         if (!liPost?.trim()) { console.log('⏭ Skipping — no content'); break; }
-        const r = await postToLiAccount(row.name, liPost);
+        const liImagePath = (row.imagesUrl || '').trim();
+        const r = liImagePath
+          ? await postToLiAccountImage(row.name, liPost, liImagePath)
+          : await postToLiAccount(row.name, liPost);
         liPost = r.postText || liPost;
-        await saveLiBatchResult(row, { liPost, liPostUrl: r.postUrl || '', liStatus: r.success ? 'Posted' : 'Failed', liBatch: label, liError: r.error });
+        if (liImagePath) {
+          await saveLinkedinCarouselResult(row.rowIndex, { postUrl: r.postUrl || '', status: r.success ? 'Posted' : 'Failed', error: r.error });
+        } else {
+          await saveLiBatchResult(row, { liPost, liPostUrl: r.postUrl || '', liStatus: r.success ? 'Posted' : 'Failed', liBatch: label, liError: r.error });
+        }
         console.log(r.success ? `✅ Posted → ${r.postUrl}` : `❌ Failed: ${r.error}`);
         break;
       }

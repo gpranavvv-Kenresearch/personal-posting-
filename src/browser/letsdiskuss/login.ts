@@ -2,6 +2,7 @@ import { chromium, BrowserContext, Page } from 'playwright';
 import path from 'path';
 import fs from 'fs';
 import 'dotenv/config';
+import { safeCloseContext } from '../../utils/safeClose.js';
 
 const LETSDISKUSS_ACCOUNTS_FILE = '.accounts/accounts-letsdiskuss.json';
 const SESSION_ROOT = path.resolve('.sessions/letsdiskuss');
@@ -37,13 +38,11 @@ function sessionDirFor(nickname: string): string {
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
 let browserContext: BrowserContext | null = null;
+let currentSessionDir: string | null = null;
 
 export async function closeLetsdiskussBrowser(): Promise<void> {
-  if (browserContext) {
-    await browserContext.close().catch(() => {});
-    browserContext = null;
-    console.log('   Letsdiskuss browser closed.');
-  }
+  await safeCloseContext(browserContext, { label: 'Letsdiskuss', sessionDir: currentSessionDir });
+  browserContext = null;
 }
 
 async function isLoggedIn(page: Page): Promise<boolean> {
@@ -93,6 +92,7 @@ export async function loginToLetsdiskuss(options?: {
   const sessionDir = account.sessionDir
     ? path.resolve(account.sessionDir)
     : sessionDirFor(account.nickname || account.email);
+  currentSessionDir = sessionDir;
 
   const chromePath = process.env.CHROME_PATH || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
   fs.mkdirSync(sessionDir, { recursive: true });

@@ -144,11 +144,39 @@ export async function postToTumblr(
   // Click the confirmation if it shows up, otherwise carry on — its absence
   // is not a failure.
   console.log('   Checking for optional "Post" confirmation button...');
-  const postBtn = page.locator('button[aria-label="Post"]').first();
-  if (await postBtn.isVisible({ timeout: 5000 }).catch(() => false)) {
-    await postBtn.click({ timeout: 4000 }).catch(() => {});
-    console.log('   ✅ Post confirmation clicked');
-  } else {
+  const POST_CONFIRM_SELECTORS = [
+    'button[aria-label="Post"]',
+    'button:has-text("Post"):not(:has-text("Post now"))',
+    'div[role="dialog"] button:has-text("Post")',
+  ];
+  let confirmClicked = false;
+  for (const sel of POST_CONFIRM_SELECTORS) {
+    const el = page.locator(sel).first();
+    if (await el.isVisible({ timeout: 5000 }).catch(() => false)) {
+      await el.click({ timeout: 4000 }).catch(() => {});
+      confirmClicked = true;
+      console.log(`   ✅ Post confirmation clicked (${sel})`);
+      break;
+    }
+  }
+  if (!confirmClicked) {
+    // Last-resort: scan for any visible button whose exact text is "Post"
+    // (not "Post now") — catches cases where the aria-label/selectors above
+    // don't match Tumblr's current DOM but the button is genuinely there.
+    confirmClicked = await page.evaluate(() => {
+      const candidates = Array.from(document.querySelectorAll('button, div[role="button"]'));
+      for (const el of candidates) {
+        const text = (el.textContent || '').trim();
+        if (text === 'Post') {
+          (el as HTMLElement).click();
+          return true;
+        }
+      }
+      return false;
+    });
+    if (confirmClicked) console.log('   ✅ Post confirmation clicked (JS text-match fallback)');
+  }
+  if (!confirmClicked) {
     console.log('   ℹ️ No "Post" confirmation button appeared — "Post now" submitted directly, continuing.');
   }
   await sleep(5000);

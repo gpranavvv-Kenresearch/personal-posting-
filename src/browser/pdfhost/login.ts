@@ -4,6 +4,7 @@ import fs from 'fs';
 import 'dotenv/config';
 import { createInterface } from 'readline/promises';
 import { killChromeForProfile } from '../../utils/killChrome.js';
+import { safeCloseContext } from '../../utils/safeClose.js';
 
 // PdfHost.io allows anonymous uploads (no account required), but an account
 // keeps uploaded files listed/manageable — so login is attempted only when
@@ -45,13 +46,11 @@ function sessionDirFor(nickname: string): string {
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
 let browserContext: BrowserContext | null = null;
+let currentSessionDir: string | null = null;
 
 export async function closePdfHostBrowser(): Promise<void> {
-  if (browserContext) {
-    await browserContext.close().catch(() => {});
-    browserContext = null;
-    console.log('   PdfHost browser closed.');
-  }
+  await safeCloseContext(browserContext, { label: 'PdfHost', sessionDir: currentSessionDir });
+  browserContext = null;
 }
 
 async function isLoggedIn(page: Page): Promise<boolean> {
@@ -71,6 +70,7 @@ async function waitForEnter(promptText: string): Promise<void> {
 }
 
 async function launchContext(sessionDir: string): Promise<Page> {
+  currentSessionDir = sessionDir;
   fs.mkdirSync(sessionDir, { recursive: true });
   await killChromeForProfile(sessionDir);
 

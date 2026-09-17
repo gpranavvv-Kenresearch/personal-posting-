@@ -4,6 +4,7 @@ import fs from 'fs';
 import 'dotenv/config';
 import { createInterface } from 'readline/promises';
 import { killChromeForProfile } from '../../utils/killChrome.js';
+import { safeCloseContext } from '../../utils/safeClose.js';
 
 // Confirmed live (2026-08-13): Pearltrees has no dedicated /login route (it
 // 404s to /ooops) — the login form lives on the homepage itself, revealed by
@@ -47,13 +48,11 @@ function sessionDirFor(nickname: string): string {
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
 let browserContext: BrowserContext | null = null;
+let currentSessionDir: string | null = null;
 
 export async function closePearltreesBrowser(): Promise<void> {
-  if (browserContext) {
-    await browserContext.close().catch(() => {});
-    browserContext = null;
-    console.log('   Pearltrees browser closed.');
-  }
+  await safeCloseContext(browserContext, { label: 'Pearltrees', sessionDir: currentSessionDir });
+  browserContext = null;
 }
 
 // The homepage renders the "Join / Log in" form for logged-out visitors and
@@ -77,6 +76,7 @@ async function waitForEnter(promptText: string): Promise<void> {
 }
 
 async function launchContext(sessionDir: string): Promise<Page> {
+  currentSessionDir = sessionDir;
   fs.mkdirSync(sessionDir, { recursive: true });
   await killChromeForProfile(sessionDir);
 

@@ -4,6 +4,7 @@ import fs from 'fs';
 import 'dotenv/config';
 import { createInterface } from 'readline/promises';
 import { killChromeForProfile } from '../../utils/killChrome.js';
+import { safeCloseContext } from '../../utils/safeClose.js';
 import { sessionDirForAccount } from '../../config/chatGptAccountTracker.js';
 
 const CHROME_PATH = process.env.CHROME_PATH || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
@@ -18,15 +19,13 @@ const LOGIN_BUTTON_SELECTOR = 'button:has-text("Log in"), a:has-text("Log in")';
 let browserContext: BrowserContext | null = null;
 let page: Page | null = null;
 let activeAccount: string | null = null;
+let currentSessionDir: string | null = null;
 
 export async function closeChatGptBrowser(): Promise<void> {
-  if (browserContext) {
-    await browserContext.close().catch(() => {});
-    browserContext = null;
-    page = null;
-    activeAccount = null;
-    console.log('   ChatGPT browser closed.');
-  }
+  await safeCloseContext(browserContext, { label: 'ChatGPT', sessionDir: currentSessionDir });
+  browserContext = null;
+  page = null;
+  activeAccount = null;
 }
 
 async function launchBrowser(accountName: string): Promise<Page> {
@@ -42,6 +41,7 @@ async function launchBrowser(accountName: string): Promise<Page> {
   }
 
   const sessionDir = sessionDirForAccount(accountName);
+  currentSessionDir = sessionDir;
   fs.mkdirSync(sessionDir, { recursive: true });
 
   const chromePath = fs.existsSync(CHROME_PATH) ? CHROME_PATH : chromium.executablePath();

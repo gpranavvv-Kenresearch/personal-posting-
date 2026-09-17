@@ -17,5 +17,18 @@ logs/*.log.bak
 .generated/
 generated_images/
 outputs/
+output/
 debug-scratch/
 Untitled
+israel-logistics-*.png
+
+# li-carousel is a self-contained sub-project — keep its source (scripts,
+# prompts, package.json) but never its dependencies, generated output, or
+# live ChatGPT browser session/credentials.
+li-carousel/node_modules/
+li-carousel/.auth/
+li-carousel/.env
+li-carousel/images/
+li-carousel/briefs/
+__pycache__/
+*.pyc

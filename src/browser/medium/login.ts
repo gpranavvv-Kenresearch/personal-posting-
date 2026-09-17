@@ -3,6 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import 'dotenv/config';
 import { killChromeForProfile } from '../../utils/killChrome.js';
+import { safeCloseContext } from '../../utils/safeClose.js';
 
 const MEDIUM_ACCOUNTS_FILE = '.accounts/accounts-medium.json';
 const SESSION_ROOT = path.resolve('.sessions/medium');
@@ -37,13 +38,11 @@ function sessionDirFor(username: string): string {
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
 let browserContext: BrowserContext | null = null;
+let currentSessionDir: string | null = null;
 
 export async function closeMediumBrowser(): Promise<void> {
-  if (browserContext) {
-    await browserContext.close().catch(() => {});
-    browserContext = null;
-    console.log('   Medium browser closed.');
-  }
+  await safeCloseContext(browserContext, { label: 'Medium', sessionDir: currentSessionDir });
+  browserContext = null;
 }
 
 export async function loginToMedium(options?: {
@@ -64,6 +63,7 @@ export async function loginToMedium(options?: {
 
   const chromePath = process.env.CHROME_PATH || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
   const sessionDir = account?.sessionDir ? path.resolve(account.sessionDir) : sessionDirFor(email);
+  currentSessionDir = sessionDir;
 
   // Don't create if it doesn't exist - use existing saved session
   if (!fs.existsSync(sessionDir)) {

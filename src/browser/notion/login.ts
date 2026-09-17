@@ -3,6 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import 'dotenv/config';
 import { killChromeForProfile } from '../../utils/killChrome.js';
+import { safeCloseContext } from '../../utils/safeClose.js';
 
 const NOTION_ACCOUNTS_FILE = '.accounts/accounts-notion.json';
 const SESSION_ROOT = path.resolve('.sessions/notion');
@@ -37,13 +38,11 @@ function sessionDirFor(nickname: string): string {
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
 let browserContext: BrowserContext | null = null;
+let currentSessionDir: string | null = null;
 
 export async function closeNotionBrowser(): Promise<void> {
-  if (browserContext) {
-    await browserContext.close().catch(() => {});
-    browserContext = null;
-    console.log('   Notion browser closed.');
-  }
+  await safeCloseContext(browserContext, { label: 'Notion', sessionDir: currentSessionDir });
+  browserContext = null;
 }
 
 async function isLoggedIn(page: Page): Promise<boolean> {
@@ -78,6 +77,7 @@ export async function loginToNotion(options?: { nickname?: string; headless?: bo
 
   const chromePath = process.env.CHROME_PATH || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
   const sessionDir = account.sessionDir ? path.resolve(account.sessionDir) : sessionDirFor(account.nickname || account.email || 'default');
+  currentSessionDir = sessionDir;
 
   fs.mkdirSync(sessionDir, { recursive: true });
   await killChromeForProfile(sessionDir);

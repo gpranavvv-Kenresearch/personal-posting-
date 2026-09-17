@@ -119,12 +119,12 @@ export async function postToNotion(
     }
   }
 
-  // After pasting: wait 10s for the paste to fully settle, then check for
+  // After pasting: wait 8s for the paste to fully settle, then check for
   // the Share button. If it's not up yet, wait 5s more and check again, up
-  // to 3 checks total (10s, 15s, 20s cumulative) — then give up for real
+  // to 3 checks total (8s, 13s, 18s cumulative) — then give up for real
   // (throw) instead of silently returning the draft URL as if it worked.
-  console.log('   Waiting 10s for content paste to settle...');
-  await sleep(10000);
+  console.log('   Waiting 8s for content paste to settle...');
+  await sleep(8000);
 
   console.log('   Opening Share panel...');
   let shareBtn = null;

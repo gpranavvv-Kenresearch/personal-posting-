@@ -3,6 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import 'dotenv/config';
 import { killChromeForProfile } from '../../utils/killChrome.js';
+import { safeCloseContext } from '../../utils/safeClose.js';
 
 const ARTICLESCAD_ACCOUNTS_FILE = '.accounts/accounts-articlescad.json';
 const SESSION_ROOT = path.resolve('.sessions/articlescad');
@@ -37,13 +38,11 @@ function sessionDirFor(email: string): string {
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
 let browserContext: BrowserContext | null = null;
+let currentSessionDir: string | null = null;
 
 export async function closeArticlescadBrowser(): Promise<void> {
-  if (browserContext) {
-    await browserContext.close().catch(() => {});
-    browserContext = null;
-    console.log('   Articlescad browser closed.');
-  }
+  await safeCloseContext(browserContext, { label: 'Articlescad', sessionDir: currentSessionDir });
+  browserContext = null;
 }
 
 async function isAlreadyLoggedIn(page: Page): Promise<boolean> {
@@ -77,6 +76,7 @@ export async function loginToArticlescad(options?: {
 
   const chromePath = process.env.CHROME_PATH || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
   const sessionDir = account?.sessionDir ? path.resolve(account.sessionDir) : sessionDirFor(email);
+  currentSessionDir = sessionDir;
 
   fs.mkdirSync(sessionDir, { recursive: true });
   await killChromeForProfile(sessionDir);

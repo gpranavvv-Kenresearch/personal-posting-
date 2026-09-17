@@ -18,29 +18,22 @@ export interface BlogSanityResult {
 
 // ---------------------------------------------------------------------------
 // Rule 1 — normalize every <img> tag to the exact canonical shape:
-//   <img src='URL' alt='ALT market research'/>
-// (single-quoted attributes, self-closing, alt always ends with
-// "market research"). Handles double-quoted/unquoted attrs, missing alt,
-// extra attributes (width/height/class/etc.), and already-correct tags.
+//   <img src='URL'>
+// (single-quoted src, no alt attribute, not self-closing). No alt is emitted
+// because any apostrophe in the title (e.g. "Thailand's") broke the old
+// single-quoted alt='...' attribute early, corrupting the rest of the tag.
+// Handles double-quoted/unquoted attrs and already-correct tags.
 // ---------------------------------------------------------------------------
 function normalizeImgTags(html: string, ctx: BlogSanityContext): { html: string; changed: boolean } {
   let changed = false;
-  const fallbackAltBase = (ctx.title || '').trim();
 
   const out = html.replace(/<img\b[^>]*>/gi, (tag) => {
     const srcMatch = tag.match(/\bsrc\s*=\s*(?:'([^']*)'|"([^"]*)"|([^\s>]+))/i);
-    const altMatch = tag.match(/\balt\s*=\s*(?:'([^']*)'|"([^"]*)"|([^\s>]+))/i);
 
     const src = (srcMatch?.[1] ?? srcMatch?.[2] ?? srcMatch?.[3] ?? '').trim();
     if (!src) return tag; // nothing to normalize against — leave untouched
 
-    let altBase = (altMatch?.[1] ?? altMatch?.[2] ?? altMatch?.[3] ?? '').trim();
-    if (!altBase) altBase = fallbackAltBase;
-    // Strip a pre-existing "market research" suffix so we don't double it up.
-    altBase = altBase.replace(/\s*market research\s*$/i, '').trim();
-    const alt = altBase ? `${altBase} market research` : 'market research';
-
-    const rebuilt = `<img src='${src}' alt='${alt}'/>`;
+    const rebuilt = `<img src='${src}'>`;
     if (rebuilt !== tag) changed = true;
     return rebuilt;
   });

@@ -4,6 +4,7 @@ import fs from 'fs';
 import 'dotenv/config';
 import { createInterface } from 'readline/promises';
 import { killChromeForProfile } from '../../utils/killChrome.js';
+import { safeCloseContext } from '../../utils/safeClose.js';
 
 // TODO(locators): 4shared's login form is best-effort — confirm field names
 // against the live DOM on first authenticated test run, same convention as
@@ -46,13 +47,11 @@ function sessionDirFor(nickname: string): string {
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
 let browserContext: BrowserContext | null = null;
+let currentSessionDir: string | null = null;
 
 export async function closeFourSharedBrowser(): Promise<void> {
-  if (browserContext) {
-    await browserContext.close().catch(() => {});
-    browserContext = null;
-    console.log('   4shared browser closed.');
-  }
+  await safeCloseContext(browserContext, { label: '4shared', sessionDir: currentSessionDir });
+  browserContext = null;
 }
 
 // A "not redirected to /login" check was a false positive — 4shared can
@@ -78,6 +77,7 @@ async function waitForEnter(promptText: string): Promise<void> {
 }
 
 async function launchContext(sessionDir: string): Promise<Page> {
+  currentSessionDir = sessionDir;
   fs.mkdirSync(sessionDir, { recursive: true });
   await killChromeForProfile(sessionDir);
 

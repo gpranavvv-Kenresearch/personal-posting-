@@ -3,6 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import 'dotenv/config';
 import { killChromeForProfile } from '../../utils/killChrome.js';
+import { safeCloseContext } from '../../utils/safeClose.js';
 
 const MASTODON_LOGIN_URL = 'https://mastodon.social/auth/sign_in';
 const MASTODON_HOME_URL = 'https://mastodon.social/';
@@ -39,13 +40,11 @@ function sessionDirFor(nickname: string): string {
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
 let browserContext: BrowserContext | null = null;
+let currentSessionDir: string | null = null;
 
 export async function closeMastodonBrowser(): Promise<void> {
-  if (browserContext) {
-    await browserContext.close().catch(() => {});
-    browserContext = null;
-    console.log('   Mastodon browser closed.');
-  }
+  await safeCloseContext(browserContext, { label: 'Mastodon', sessionDir: currentSessionDir });
+  browserContext = null;
 }
 
 function pageLooksLoggedIn(url: string): boolean {
@@ -85,6 +84,7 @@ export async function loginToMastodon(options?: { nickname?: string }): Promise<
 
   const chromePath = process.env.CHROME_PATH || (process.platform === 'win32' ? 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe' : undefined);
   const sessionDir = account.sessionDir ? path.resolve(account.sessionDir) : sessionDirFor(account.nickname || account.email || 'default');
+  currentSessionDir = sessionDir;
 
   fs.mkdirSync(sessionDir, { recursive: true });
   await killChromeForProfile(sessionDir);

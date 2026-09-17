@@ -4,6 +4,7 @@ import fs from 'fs';
 import 'dotenv/config';
 import { createInterface } from 'readline/promises';
 import { killChromeForProfile } from '../../utils/killChrome.js';
+import { safeCloseContext } from '../../utils/safeClose.js';
 
 // TODO(locators): selectors below are best-effort against Instapaper's public
 // login form — confirm against the real DOM on first authenticated test run
@@ -43,13 +44,11 @@ function sessionDirFor(nickname: string): string {
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
 let browserContext: BrowserContext | null = null;
+let currentSessionDir: string | null = null;
 
 export async function closeInstapaperBrowser(): Promise<void> {
-  if (browserContext) {
-    await browserContext.close().catch(() => {});
-    browserContext = null;
-    console.log('   Instapaper browser closed.');
-  }
+  await safeCloseContext(browserContext, { label: 'Instapaper', sessionDir: currentSessionDir });
+  browserContext = null;
 }
 
 async function isLoggedIn(page: Page): Promise<boolean> {
@@ -69,6 +68,7 @@ async function waitForEnter(promptText: string): Promise<void> {
 }
 
 async function launchContext(sessionDir: string): Promise<Page> {
+  currentSessionDir = sessionDir;
   fs.mkdirSync(sessionDir, { recursive: true });
   await killChromeForProfile(sessionDir);
 

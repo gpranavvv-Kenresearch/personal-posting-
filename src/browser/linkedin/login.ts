@@ -3,6 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import 'dotenv/config';
 import { killChromeForProfile } from '../../utils/killChrome.js';
+import { safeCloseContext } from '../../utils/safeClose.js';
 
 const LINKEDIN_ACCOUNTS_FILE = '.accounts/linkedin-accounts.json';
 const SESSION_ROOT = path.resolve('li-sessions');
@@ -78,9 +79,27 @@ async function detectTwoFactorBlock(page: Page, username: string): Promise<boole
 async function ensureLoggedIn(page: Page, email: string, password: string): Promise<boolean> {
   try {
     await page.goto('https://www.linkedin.com/feed/', { waitUntil: 'domcontentloaded' });
+    // domcontentloaded fires before the nav bar has actually rendered — a
+    // single-selector check right after it can false-negative on a genuinely
+    // logged-in session (confirmed live). Give it a moment, and check several
+    // independent logged-in indicators instead of just one.
+    await sleep(4000);
     if (await detectTwoFactorBlock(page, email)) return false;
 
-    const alreadyLoggedIn = await page.locator('a[href*="/mynetwork/"]').first().isVisible().catch(() => false);
+    const LOGGED_IN_INDICATORS = [
+      'a[href*="/mynetwork/"]',
+      'a[href*="/feed/"]',
+      'a[href*="/messaging/"]',
+      'div[role="button"]:has-text("Start a post")',
+      '#global-nav',
+    ];
+    let alreadyLoggedIn = false;
+    for (const sel of LOGGED_IN_INDICATORS) {
+      if (await page.locator(sel).first().isVisible().catch(() => false)) {
+        alreadyLoggedIn = true;
+        break;
+      }
+    }
     if (alreadyLoggedIn) {
       console.log(`   ✅ ${email}: already logged in`);
       return true;
@@ -140,13 +159,11 @@ async function ensureLoggedIn(page: Page, email: string, password: string): Prom
 // ── Browser context management ──────────────────────────────────────────────
 
 let browserContext: BrowserContext | null = null;
+let currentSessionDir: string | null = null;
 
 export async function closeLinkedInBrowser(): Promise<void> {
-  if (browserContext) {
-    await browserContext.close().catch(() => {});
-    browserContext = null;
-    console.log('   LinkedIn browser closed.');
-  }
+  await safeCloseContext(browserContext, { label: 'LinkedIn', sessionDir: currentSessionDir });
+  browserContext = null;
 }
 
 export async function loginToLinkedIn(options?: {
@@ -163,6 +180,7 @@ export async function loginToLinkedIn(options?: {
 
   const chromePath = fs.existsSync(CHROME_PATH) ? CHROME_PATH : chromium.executablePath();
   const sessionDir = account?.sessionDir ? path.resolve(account.sessionDir) : sessionDirFor(email);
+  currentSessionDir = sessionDir;
   fs.mkdirSync(sessionDir, { recursive: true });
   await killChromeForProfile(sessionDir);
 

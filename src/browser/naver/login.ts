@@ -4,6 +4,7 @@ import fs from 'fs';
 import 'dotenv/config';
 import { createInterface } from 'readline/promises';
 import { killChromeForProfile } from '../../utils/killChrome.js';
+import { safeCloseContext } from '../../utils/safeClose.js';
 
 // TODO(locators): confirm login URL — section.blog.naver.com redirects through
 // nid.naver.com for auth. Update if the redirect target changes.
@@ -97,6 +98,7 @@ async function checkNaverStaySignedIn(page: Page): Promise<void> {
 }
 
 let browserContext: BrowserContext | null = null;
+let currentSessionDir: string | null = null;
 
 export async function closeNaverBrowser(): Promise<void> {
   if (browserContext) {
@@ -106,10 +108,9 @@ export async function closeNaverBrowser(): Promise<void> {
     // here, right before shutdown, so it captures whatever accumulated
     // during the whole session instead of just what existed at login time.
     await persistSessionCookies(browserContext).catch(() => {});
-    await browserContext.close().catch(() => {});
-    browserContext = null;
-    console.log('   Naver browser closed.');
   }
+  await safeCloseContext(browserContext, { label: 'Naver', sessionDir: currentSessionDir });
+  browserContext = null;
 }
 
 // Confirmed against a real logged-in BlogHome screenshot (2026-07-22): the
@@ -154,6 +155,7 @@ export async function loginToNaver(options?: { nickname?: string }): Promise<Pag
 
   const chromePath = process.env.CHROME_PATH || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
   const sessionDir = account.sessionDir ? path.resolve(account.sessionDir) : sessionDirFor(account.nickname || account.email || 'default');
+  currentSessionDir = sessionDir;
 
   fs.mkdirSync(sessionDir, { recursive: true });
   await killChromeForProfile(sessionDir);
@@ -278,6 +280,7 @@ export async function loginToNaverInteractive(options?: { nickname?: string }): 
 
   const chromePath = process.env.CHROME_PATH || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
   const sessionDir = account.sessionDir ? path.resolve(account.sessionDir) : sessionDirFor(account.nickname || account.email || 'default');
+  currentSessionDir = sessionDir;
 
   fs.mkdirSync(sessionDir, { recursive: true });
   await killChromeForProfile(sessionDir);

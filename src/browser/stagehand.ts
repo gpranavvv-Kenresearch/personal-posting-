@@ -27,6 +27,21 @@ export async function pasteText(page: Page, text: string): Promise<void> {
 }
 
 /**
+ * Facebook/LinkedIn's paste handler treats a truly-empty line between two
+ * paragraphs as "nothing" and strips it, collapsing the visual blank-line
+ * spacing the content was written with. Inserting an invisible-but-non-empty
+ * character (U+2800, Braille Pattern Blank) on each blank line gives the
+ * parser "content" to preserve — it still renders as blank space to the
+ * reader. Same trick every LinkedIn/Facebook line-break-fixer tool uses.
+ */
+function preserveBlankLines(text: string): string {
+  return text
+    .split('\n')
+    .map(line => (line.trim() === '' ? '⠀' : line))
+    .join('\n');
+}
+
+/**
  * Same clipboard-paste approach as pasteText(), but pastes as plain text
  * (Ctrl+Shift+V) instead of a normal paste (Ctrl+V). Rich-text composer
  * boxes (Facebook's/LinkedIn's post editor) can otherwise carry over
@@ -38,7 +53,28 @@ export async function pasteText(page: Page, text: string): Promise<void> {
  * click/focus the target field first.
  */
 export async function pasteTextPlain(page: Page, text: string): Promise<void> {
-  await page.evaluate((t) => navigator.clipboard.writeText(t), text);
+  const withBlankLinesPreserved = preserveBlankLines(text);
+
+  // The OS clipboard is a shared resource across every browser process this
+  // repo runs concurrently (Facebook uses this same helper) — another
+  // account's post can clobber it between our write and the paste keystroke.
+  // Re-write + verify via readText immediately before pasting, retrying a
+  // few times, to catch and correct that race instead of silently pasting
+  // whatever another process left in the clipboard.
+  let confirmed = false;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    await page.evaluate((t) => navigator.clipboard.writeText(t), withBlankLinesPreserved);
+    await page.waitForTimeout(300);
+    const clipboardNow = await page.evaluate(() => navigator.clipboard.readText()).catch(() => null);
+    if (clipboardNow === withBlankLinesPreserved) {
+      confirmed = true;
+      break;
+    }
+  }
+  if (!confirmed) {
+    console.warn('   ⚠️  Clipboard content could not be confirmed after 3 attempts — pasting anyway.');
+  }
+
   await page.keyboard.press('Control+A');
   await page.keyboard.press('Control+Shift+V');
 }

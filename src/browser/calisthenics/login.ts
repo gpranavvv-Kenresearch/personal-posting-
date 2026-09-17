@@ -6,6 +6,7 @@ import { chromium, BrowserContext, Page } from 'playwright';
 import fs from 'fs';
 import path from 'path';
 import { killChromeForProfile } from '../../utils/killChrome.js';
+import { safeCloseContext } from '../../utils/safeClose.js';
 
 interface CalisthenicsAccount {
   username: string;
@@ -21,6 +22,7 @@ const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
 let browserContext: BrowserContext | null = null;
 let currentNickname: string | null = null;
+let currentSessionDir: string | null = null;
 
 export function getCalisthenicsAccounts(): CalisthenicsAccount[] {
   if (!fs.existsSync(ACCOUNTS_FILE)) return [];
@@ -35,12 +37,9 @@ export function getCalisthenicsAccountByNickname(nickname: string): Calisthenics
 }
 
 export async function closeCaliBrowser(): Promise<void> {
-  if (browserContext) {
-    await browserContext.close().catch(() => {});
-    browserContext = null;
-    currentNickname = null;
-    console.log('   Calisthenics browser closed.');
-  }
+  await safeCloseContext(browserContext, { label: 'Calisthenics', sessionDir: currentSessionDir });
+  browserContext = null;
+  currentNickname = null;
 }
 
 export async function loginCalisthenics(nickname: string, manualLogin = false): Promise<Page> {
@@ -53,6 +52,7 @@ export async function loginCalisthenics(nickname: string, manualLogin = false): 
   }
 
   const sessionDir = path.resolve(account.sessionDir);
+  currentSessionDir = sessionDir;
   fs.mkdirSync(sessionDir, { recursive: true });
   await killChromeForProfile(sessionDir);
 

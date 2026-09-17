@@ -3,6 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import 'dotenv/config';
 import { killChromeForProfile } from '../../utils/killChrome.js';
+import { safeCloseContext } from '../../utils/safeClose.js';
 
 const HACKMD_ACCOUNTS_FILE = '.accounts/accounts-hackmd.json';
 const SESSION_ROOT = path.resolve('.sessions/hackmd');
@@ -37,13 +38,11 @@ function sessionDirFor(username: string): string {
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
 let browserContext: BrowserContext | null = null;
+let currentSessionDir: string | null = null;
 
 export async function closeHackMDBrowser(): Promise<void> {
-  if (browserContext) {
-    await browserContext.close().catch(() => {});
-    browserContext = null;
-    console.log('   HackMD browser closed.');
-  }
+  await safeCloseContext(browserContext, { label: 'HackMD', sessionDir: currentSessionDir });
+  browserContext = null;
 }
 
 async function isAlreadyLoggedIn(page: Page): Promise<boolean> {
@@ -99,6 +98,7 @@ export async function loginToHackMD(options?: {
 
   const chromePath = process.env.CHROME_PATH || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
   const sessionDir = account?.sessionDir ? path.resolve(account.sessionDir) : sessionDirFor(email);
+  currentSessionDir = sessionDir;
 
   fs.mkdirSync(sessionDir, { recursive: true });
 

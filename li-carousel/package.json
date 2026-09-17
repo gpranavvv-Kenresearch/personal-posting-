@@ -1,0 +1,17 @@
+{
+  "name": "li-carousel",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "sheet:next":  "node scripts/carousel_sheet.js next",
+    "sheet:write": "node scripts/carousel_sheet.js write",
+    "image":       "node scripts/generate_image.js",
+    "correct":     "node scripts/renderer/correct_slide.js",
+    "pdf":         "node scripts/renderer/combine_pdf.js"
+  },
+  "dependencies": {
+    "dotenv":     "^16.4.0",
+    "googleapis": "^144.0.0",
+    "playwright":  "^1.49.0"
+  }
+}

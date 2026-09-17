@@ -4,6 +4,7 @@ import fs from 'fs';
 import 'dotenv/config';
 import { createInterface } from 'readline/promises';
 import { killChromeForProfile } from '../../utils/killChrome.js';
+import { safeCloseContext } from '../../utils/safeClose.js';
 
 // TODO(locators): Raindrop.io's app shell is a React SPA — selectors below
 // are best-effort guesses against the public /login form. Confirm against
@@ -45,13 +46,11 @@ function sessionDirFor(nickname: string): string {
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
 let browserContext: BrowserContext | null = null;
+let currentSessionDir: string | null = null;
 
 export async function closeRaindropBrowser(): Promise<void> {
-  if (browserContext) {
-    await browserContext.close().catch(() => {});
-    browserContext = null;
-    console.log('   Raindrop browser closed.');
-  }
+  await safeCloseContext(browserContext, { label: 'Raindrop', sessionDir: currentSessionDir });
+  browserContext = null;
 }
 
 // Checks the CURRENT page first (no reload) — Raindrop is a heavy SPA, and a
@@ -79,6 +78,7 @@ async function waitForEnter(promptText: string): Promise<void> {
 }
 
 async function launchContext(sessionDir: string): Promise<Page> {
+  currentSessionDir = sessionDir;
   fs.mkdirSync(sessionDir, { recursive: true });
   await killChromeForProfile(sessionDir);
 

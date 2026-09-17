@@ -1,0 +1,190 @@
+// run_single_image_test.js — single-image (not 7-slide carousel) live test.
+//
+// Given a sheet row number (or a count), for each row:
+//   1. Reads that row's title + URL from the Social Media sheet
+//   2. Fills images/briefs/template_infographic.txt with the title
+//   3. Runs generate_image.js to produce ONE image via ChatGPT
+//   4. Writes the resulting local image path back to the sheet (col E)
+//
+// Usage:
+//   node scripts/run_single_image_test.js --row=N
+//     → process exactly row N
+//
+//   node scripts/run_single_image_test.js --count=5
+//     → auto-picks the next 5 rows where col A has a URL and col E is
+//       still empty, processing them one at a time (each fully finishes —
+//       image generated, downloaded, written to sheet — before the next
+//       starts, since only one ChatGPT session/browser window runs at a time)
+//
+//   node scripts/run_single_image_test.js --row=10 --count=5
+//     → process 5 consecutive rows starting at row 10 (10,11,12,13,14),
+//       skipping any that already have col E filled or no title
+
+import 'dotenv/config';
+import { google } from 'googleapis';
+import { execSync } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const ROOT = path.resolve(__dirname, '..');
+
+const SHEET_ID = process.env.SOCIAL_SHEET_ID;
+const SA_FILE  = process.env.GOOGLE_SERVICE_ACCOUNT_FILE;
+const TAB      = 'Social Media';
+const COL_A    = 0;  // targetUrl
+const COL_B    = 1;  // title
+const COL_E    = 4;  // local image/PDF path
+
+function colLetter(idx) {
+  let s = '', n = idx + 1;
+  while (n > 0) {
+    const r = (n - 1) % 26;
+    s = String.fromCharCode(65 + r) + s;
+    n = Math.floor((n - 1) / 26);
+  }
+  return s;
+}
+
+function slugify(title) {
+  return title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60);
+}
+
+async function getSheetsClient() {
+  if (!SHEET_ID || !SA_FILE) {
+    console.error('Missing SOCIAL_SHEET_ID or GOOGLE_SERVICE_ACCOUNT_FILE in .env');
+    process.exit(1);
+  }
+  const SA = JSON.parse(fs.readFileSync(SA_FILE, 'utf8'));
+  const auth = new google.auth.JWT({
+    email: SA.client_email,
+    key: SA.private_key,
+    scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+  });
+  return google.sheets({ version: 'v4', auth });
+}
+
+// Finds up to `count` row numbers (>= startRow) that have a title/URL but
+// an empty column E, by scanning the whole sheet once.
+async function findPendingRows(sheets, startRow, count) {
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: SHEET_ID,
+    range: `'${TAB}'!A:E`,
+  });
+  const rows = res.data.values ?? [];
+  const picked = [];
+  for (let i = Math.max(startRow - 1, 1); i < rows.length && picked.length < count; i++) {
+    const r = rows[i];
+    const url = (r[COL_A] ?? '').trim();
+    const title = (r[COL_B] ?? '').trim();
+    const existingE = (r[COL_E] ?? '').trim();
+    if (url && title && !existingE) picked.push(i + 1); // 1-indexed sheet row
+  }
+  return picked;
+}
+
+async function processRow(sheets, rowNum) {
+  console.log(`\n${'='.repeat(60)}`);
+  console.log(`ROW ${rowNum}`);
+  console.log('='.repeat(60));
+
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: SHEET_ID,
+    range: `'${TAB}'!A${rowNum}:B${rowNum}`,
+  });
+  const row = res.data.values?.[0] ?? [];
+  const targetUrl = (row[COL_A] ?? '').trim();
+  const title = (row[COL_B] ?? '').trim();
+  if (!title) {
+    console.error(`Row ${rowNum} has no title in column B — skipping.`);
+    return { row: rowNum, ok: false, reason: 'no title' };
+  }
+  console.log(`Title: "${title}"`);
+  console.log(`URL:   ${targetUrl}`);
+
+  const templatePath = path.join(ROOT, 'images', 'briefs', 'template_infographic.txt');
+  const template = fs.readFileSync(templatePath, 'utf8');
+  const filled = template.replaceAll('{{TITLE}}', title);
+
+  const slug = slugify(title);
+  const promptPath = path.join(ROOT, 'images', 'briefs', `prompt_${slug}.txt`);
+  fs.writeFileSync(promptPath, filled, 'utf8');
+  console.log(`Prompt written: ${promptPath}`);
+
+  console.log('\nGenerating image via ChatGPT (this can take several minutes)...');
+  try {
+    execSync(
+      `node scripts/generate_image.js --prompt-file="${promptPath}" --slug="${slug}"`,
+      { cwd: ROOT, stdio: 'inherit' }
+    );
+  } catch (err) {
+    console.error(`Row ${rowNum}: image generation failed — ${err.message}`);
+    return { row: rowNum, ok: false, reason: 'generation failed' };
+  }
+
+  const today = new Date().toISOString().slice(0, 10);
+  const imagePath = path.join(ROOT, 'images', `image_${today}_${slug}.png`);
+  if (!fs.existsSync(imagePath)) {
+    console.error(`Expected image not found at ${imagePath} — generation likely failed.`);
+    return { row: rowNum, ok: false, reason: 'file missing' };
+  }
+  console.log(`Image saved: ${imagePath}`);
+
+  console.log(`\nWriting image path back to row ${rowNum}, column ${colLetter(COL_E)}...`);
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: SHEET_ID,
+    range: `'${TAB}'!${colLetter(COL_E)}${rowNum}`,
+    valueInputOption: 'USER_ENTERED',
+    requestBody: { values: [[imagePath]] },
+  });
+
+  return { row: rowNum, ok: true, title, imagePath };
+}
+
+async function main() {
+  const args = Object.fromEntries(
+    process.argv.slice(2).map((a) => {
+      const m = a.match(/^--([^=]+)=(.*)$/);
+      return m ? [m[1], m[2]] : [a.replace(/^--/, ''), true];
+    })
+  );
+
+  const explicitRow = args.row ? parseInt(args.row, 10) : null;
+  const count = args.count ? parseInt(args.count, 10) : null;
+
+  if (!explicitRow && !count) {
+    console.error('Usage: node scripts/run_single_image_test.js --row=N | --count=N | --row=N --count=N');
+    process.exit(1);
+  }
+
+  const sheets = await getSheetsClient();
+  const results = [];
+
+  if (explicitRow && !count) {
+    results.push(await processRow(sheets, explicitRow));
+  } else {
+    const startRow = explicitRow ?? 2;
+    const rowsToProcess = await findPendingRows(sheets, startRow, count);
+    if (!rowsToProcess.length) {
+      console.log('No pending rows found (need a title + URL in col A/B and empty col E).');
+      return;
+    }
+    console.log(`Picked ${rowsToProcess.length} row(s): ${rowsToProcess.join(', ')}`);
+    for (const rowNum of rowsToProcess) {
+      results.push(await processRow(sheets, rowNum));
+    }
+  }
+
+  console.log(`\n${'='.repeat(60)}`);
+  console.log('SUMMARY');
+  console.log('='.repeat(60));
+  for (const r of results) {
+    console.log(r.ok ? `  Row ${r.row}: OK → ${r.imagePath}` : `  Row ${r.row}: FAILED (${r.reason})`);
+  }
+}
+
+main().catch(err => {
+  console.error('Error:', err?.message ?? err);
+  process.exit(1);
+});

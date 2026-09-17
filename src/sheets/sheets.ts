@@ -44,8 +44,15 @@ const CONTENT_POOL_SHEET_NAME = 'Content Pool';
 const NEW_LOGIC_SHEET_ID = '1p_N3zzJbUx-7t8sjuAtbQsHaUfVmYxytQU_gDd2MGwQ'; // New Logic tab — 3-slot independent posting (Linkmate/Calisthenics/HackMD/Blogger/Notion/Dev.to/Coda/LinkedIn Pulse/WordPress)
 const NEW_LOGIC_SHEET_NAME = 'New Logic';
 
+// RSS Extraction tab — raw landing zone for every item the Tech Team RSS feed
+// reports. Nothing reads from this tab automatically yet; it exists so the
+// full raw feed is captured, with the Social Media / New Logic feed-in logic
+// to be built against it later (see PRD_RSS_Content_Distribution.md).
+const RSS_EXTRACTION_SHEET_ID = '1p_N3zzJbUx-7t8sjuAtbQsHaUfVmYxytQU_gDd2MGwQ';
+const RSS_EXTRACTION_SHEET_NAME = 'RSS Extraction';
+
 // Helper to get sheet config based on platform
-function getSheetConfig(platform?: 'social' | 'blog' | 'pool' | 'newLogic'): { id: string; name: string } {
+function getSheetConfig(platform?: 'social' | 'blog' | 'pool' | 'newLogic' | 'rssExtraction'): { id: string; name: string } {
   if (platform === 'blog') {
     return { id: BLOG_SHEET_ID, name: BLOG_SHEET_NAME };
   }
@@ -55,6 +62,9 @@ function getSheetConfig(platform?: 'social' | 'blog' | 'pool' | 'newLogic'): { i
   if (platform === 'newLogic') {
     return { id: NEW_LOGIC_SHEET_ID, name: NEW_LOGIC_SHEET_NAME };
   }
+  if (platform === 'rssExtraction') {
+    return { id: RSS_EXTRACTION_SHEET_ID, name: RSS_EXTRACTION_SHEET_NAME };
+  }
   return { id: SOCIAL_SHEET_ID, name: SOCIAL_SHEET_NAME }; // default to social
 }
 
@@ -62,7 +72,7 @@ function getSheetConfig(platform?: 'social' | 'blog' | 'pool' | 'newLogic'): { i
 const SHEET_ID   = SOCIAL_SHEET_ID;
 const SHEET_NAME = SOCIAL_SHEET_NAME;
 
-export type SheetType = 'social' | 'blog' | 'pool' | 'newLogic';
+export type SheetType = 'social' | 'blog' | 'pool' | 'newLogic' | 'rssExtraction';
 
 export interface SheetRow {
   rowIndex: number;         // 1-based row index in sheet (for updates)
@@ -75,6 +85,8 @@ export interface SheetRow {
   blogSeoDescription?: string; // "Blog SEO Description" column
   blogCaption?: string;     // "Blog Caption" column
   coverImageUrl?: string;   // "Cover Image URL" column
+  localImagePath?: string;  // "Local Image Path" column (ChatGPT-generated blog cover, saved to local disk)
+  socialPostImagePath?: string; // "Social Post Image Path" column (ChatGPT-generated text-post card, saved to local disk)
   targetUrl: string;
   marketValue: string;      // fetched from Tavily at post time (not read from sheet)
   cagr?: string;            // fetched from report page (not read from sheet)
@@ -424,6 +436,8 @@ function mapRow(row: string[], colMap: ColMap, rowIndex: number, sheetType: Shee
     blogSeoDescription: g(colMap, 'Blog SEO Description', 'blog seo description'),
     blogCaption:      g(colMap, 'Blog Caption', 'blog caption'),
     coverImageUrl:    g(colMap, 'Cover Image URL', 'cover image url'),
+    localImagePath:   g(colMap, 'Local Image Path', 'local image path'),
+    socialPostImagePath: g(colMap, 'Social Post Image Path', 'social post image path'),
     targetUrl:        g(colMap, 'targetUrl', 'targeturl', 'Download Report URL', 'Report URL', 'Target URL', 'URL', 'url'),
     marketValue:     g(colMap, 'market_value', 'marketValue', 'market value'),
     cagr:            g(colMap, 'cagr') || undefined,
@@ -880,6 +894,236 @@ export async function saveCoverImageUrlToPool(
   console.log(`   📝 ${sheetConfig.name} row ${row.rowIndex}: cover image URL saved immediately`);
 }
 
+// Writes whatever text ChatGPT wrote alongside the generated cover image
+// into New Logic!Z ("Image text") — purely observational for now, so this
+// never throws; a failed write here must never fail the row's blog generation.
+export async function saveNewLogicImageText(
+  row: { rowIndex: number },
+  imageText: string
+): Promise<void> {
+  if (!imageText?.trim()) return;
+  try {
+    const sheets = await getSheetsClient();
+    const sheetConfig = getSheetConfig('newLogic');
+    const colMap = await getColumnMap(sheets, sheetConfig.id, sheetConfig.name);
+    const data = buildUpdates(colMap, row.rowIndex, [{ names: ['Image text', 'image text'], value: imageText }], sheetConfig.name);
+    await batchWrite(sheets, data, sheetConfig.id);
+    console.log(`   📝 ${sheetConfig.name} row ${row.rowIndex}: image text saved`);
+  } catch (err: any) {
+    console.log(`   ⚠️ Could not save image text (non-fatal): ${err.message}`);
+  }
+}
+
+// ──── Blogs tab: rows needing a ChatGPT-generated cover image saved locally ────
+// Picks rows with a Blog Title but no "Local Image Path" yet — independent of
+// the Content Pool's Drive-upload "Cover Image URL" flow above.
+
+export async function getBlogRowsNeedingLocalImage(limit: number = 5): Promise<SheetRow[]> {
+  const sheets = await getSheetsClient();
+  const sheetConfig = getSheetConfig('blog');
+  const colMap = await getColumnMap(sheets, sheetConfig.id, sheetConfig.name);
+
+  const res = await withRetry(() => sheets.spreadsheets.values.get({
+    spreadsheetId: sheetConfig.id,
+    range: `${sheetConfig.name}!A:ZZ`,
+  }), 'getBlogRowsNeedingLocalImage');
+
+  const rows: string[][] = res.data.values ?? [];
+  const titleIdx = col(colMap, 'Blog Title', 'blog title', 'Title', 'title', 'Main Title') ?? -1;
+  const pathIdx = col(colMap, 'Local Image Path', 'local image path') ?? -1;
+
+  if (titleIdx === -1) {
+    console.warn('   ⚠️ [blog-image] "Blog Title" column not found on "Blogs" tab — cannot pick rows.');
+    return [];
+  }
+
+  const pending: SheetRow[] = [];
+  for (let i = 1; i < rows.length && pending.length < limit; i++) {
+    const row = rows[i];
+    const title = (row[titleIdx] ?? '').trim();
+    const existingPath = pathIdx >= 0 ? (row[pathIdx] ?? '').trim() : '';
+    if (!title || existingPath) continue;
+    pending.push(mapRow(row, colMap, i + 1, 'blog'));
+  }
+
+  return pending;
+}
+
+/** Write the local (on-disk) generated cover image path for a Blogs-tab row. */
+export async function saveLocalImagePath(row: { rowIndex: number }, localPath: string): Promise<void> {
+  if (!localPath) return;
+  const sheets = await getSheetsClient();
+  const sheetConfig = getSheetConfig('blog');
+  const colMap = await getColumnMap(sheets, sheetConfig.id, sheetConfig.name);
+  const data = buildUpdates(colMap, row.rowIndex, [{ names: ['Local Image Path', 'local image path'], value: localPath }], sheetConfig.name);
+  await batchWrite(sheets, data, sheetConfig.id);
+  console.log(`   📝 Blogs row ${row.rowIndex}: local image path saved`);
+}
+
+// ──── Blogs tab: rows needing a ChatGPT-generated TEXT-POST card image ────
+// Separate from getBlogRowsNeedingLocalImage above (blog hero cover) — this
+// is the lighter branded social-card image that rides along an FB/LI/X text
+// post, tracked in its own "Social Post Image Path" column so the two flows
+// never collide on the same cell.
+
+export async function getBlogRowsNeedingSocialPostImage(limit: number = 5): Promise<SheetRow[]> {
+  const sheets = await getSheetsClient();
+  const sheetConfig = getSheetConfig('blog');
+  const colMap = await getColumnMap(sheets, sheetConfig.id, sheetConfig.name);
+
+  const res = await withRetry(() => sheets.spreadsheets.values.get({
+    spreadsheetId: sheetConfig.id,
+    range: `${sheetConfig.name}!A:ZZ`,
+  }), 'getBlogRowsNeedingSocialPostImage');
+
+  const rows: string[][] = res.data.values ?? [];
+  // Column A ("Title") specifically — NOT "Blog Title" (a different, pre-existing
+  // column used for the full blog-article pipeline at a different index).
+  const titleIdx = col(colMap, 'Title', 'title') ?? -1;
+  const pathIdx = col(colMap, 'Social Post Image Path', 'social post image path') ?? -1;
+
+  if (titleIdx === -1) {
+    console.warn('   ⚠️ [social-image] "Title" column not found on "Blogs" tab — cannot pick rows.');
+    return [];
+  }
+
+  const pending: SheetRow[] = [];
+  for (let i = 1; i < rows.length && pending.length < limit; i++) {
+    const row = rows[i];
+    const title = (row[titleIdx] ?? '').trim();
+    const existingPath = pathIdx >= 0 ? (row[pathIdx] ?? '').trim() : '';
+    if (!title || existingPath) continue;
+    pending.push(mapRow(row, colMap, i + 1, 'blog'));
+  }
+
+  return pending;
+}
+
+/** Write the local (on-disk) generated text-post card image path for a Blogs-tab row. */
+export async function saveSocialPostImagePath(row: { rowIndex: number }, localPath: string): Promise<void> {
+  if (!localPath) return;
+  const sheets = await getSheetsClient();
+  const sheetConfig = getSheetConfig('blog');
+  const colMap = await getColumnMap(sheets, sheetConfig.id, sheetConfig.name);
+  const data = buildUpdates(colMap, row.rowIndex, [{ names: ['Social Post Image Path', 'social post image path'], value: localPath }], sheetConfig.name);
+  await batchWrite(sheets, data, sheetConfig.id);
+  console.log(`   📝 Blogs row ${row.rowIndex}: social post image path saved`);
+}
+
+// Same social-card image flow as above, but against the "New Logic" tab —
+// used by the nightly RSS feeder so freshly-fed New Logic rows also get a
+// branded social-card image (LI carousel), not just the blog hero cover.
+
+export async function getNewLogicRowsNeedingSocialPostImage(limit: number = 10): Promise<SheetRow[]> {
+  const sheets = await getSheetsClient();
+  const sheetConfig = getSheetConfig('newLogic');
+  const colMap = await getColumnMap(sheets, sheetConfig.id, sheetConfig.name);
+
+  const res = await withRetry(() => sheets.spreadsheets.values.get({
+    spreadsheetId: sheetConfig.id,
+    range: `${sheetConfig.name}!A:AZ`,
+  }), 'getNewLogicRowsNeedingSocialPostImage');
+
+  const rows: string[][] = res.data.values ?? [];
+  const titleIdx = col(colMap, 'Title', 'title') ?? -1;
+  const pathIdx = col(colMap, 'Social Post Image Path', 'social post image path') ?? -1;
+
+  if (titleIdx === -1) {
+    console.warn('   ⚠️ [social-image] "Title" column not found on "New Logic" tab — cannot pick rows.');
+    return [];
+  }
+
+  const pending: SheetRow[] = [];
+  for (let i = 1; i < rows.length && pending.length < limit; i++) {
+    const row = rows[i];
+    const title = (row[titleIdx] ?? '').trim();
+    const existingPath = pathIdx >= 0 ? (row[pathIdx] ?? '').trim() : '';
+    if (!title || existingPath) continue;
+    pending.push(mapRow(row, colMap, i + 1, 'newLogic'));
+  }
+
+  return pending;
+}
+
+/** Write the local (on-disk) generated text-post card image path for a New Logic-tab row. */
+export async function saveNewLogicSocialPostImagePath(row: { rowIndex: number }, localPath: string): Promise<void> {
+  if (!localPath) return;
+  const sheets = await getSheetsClient();
+  const sheetConfig = getSheetConfig('newLogic');
+  const colMap = await getColumnMap(sheets, sheetConfig.id, sheetConfig.name);
+  const data = buildUpdates(colMap, row.rowIndex, [{ names: ['Social Post Image Path', 'social post image path'], value: localPath }], sheetConfig.name);
+  await batchWrite(sheets, data, sheetConfig.id);
+  console.log(`   📝 New Logic row ${row.rowIndex}: social post image path saved`);
+}
+
+/** Find a Blogs-tab row by title (case-insensitive exact match). Returns null if not found. */
+export async function findBlogRowByTitle(title: string): Promise<SheetRow | null> {
+  const sheets = await getSheetsClient();
+  const sheetConfig = getSheetConfig('blog');
+  const colMap = await getColumnMap(sheets, sheetConfig.id, sheetConfig.name);
+
+  const res = await withRetry(() => sheets.spreadsheets.values.get({
+    spreadsheetId: sheetConfig.id,
+    range: `${sheetConfig.name}!A:ZZ`,
+  }), 'findBlogRowByTitle');
+
+  const rows: string[][] = res.data.values ?? [];
+  const titleIdx = col(colMap, 'Title', 'title') ?? -1;
+  if (titleIdx === -1) return null;
+
+  const needle = title.trim().toLowerCase();
+  for (let i = 1; i < rows.length; i++) {
+    const rowTitle = (rows[i][titleIdx] ?? '').trim().toLowerCase();
+    if (rowTitle === needle) return mapRow(rows[i], colMap, i + 1, 'blog');
+  }
+  return null;
+}
+
+/** Append a new row (Title + Target URL only) to the Blogs tab. Returns the new row's 1-based index. */
+export async function appendRowToBlogSheet(row: { title: string; targetUrl: string }): Promise<number> {
+  const sheets = await getSheetsClient();
+  const sheetConfig = getSheetConfig('blog');
+  const colMap = await getColumnMap(sheets, sheetConfig.id, sheetConfig.name);
+
+  // Column A ("Title") specifically — NOT "Blog Title" (a different,
+  // pre-existing column used for the full blog-article pipeline, sitting at
+  // a different index). Matching "Blog Title" first here previously caused
+  // titles for this flow to land in the wrong column entirely.
+  const titleIdx = col(colMap, 'Title', 'title');
+  const urlIdx = col(colMap, 'targetUrl', 'targeturl', 'Download Report URL', 'Report URL', 'Target URL', 'URL', 'url');
+  if (titleIdx === undefined || urlIdx === undefined) {
+    throw new Error('Cannot append to Blogs tab — Title or Target URL column not found');
+  }
+
+  const maxCol = Math.max(titleIdx, urlIdx) + 1;
+  const arr = Array(maxCol).fill('');
+  arr[titleIdx] = row.title;
+  arr[urlIdx] = row.targetUrl;
+
+  const appendRes = await withRetry(() => sheets.spreadsheets.values.append({
+    spreadsheetId: sheetConfig.id,
+    range: `${sheetConfig.name}!A:A`,
+    valueInputOption: 'RAW',
+    insertDataOption: 'INSERT_ROWS',
+    requestBody: { values: [arr] },
+  }), 'appendRowToBlogSheet:append');
+
+  // Read the real row number back from the API response instead of guessing
+  // it from a separate column-A count beforehand — that count silently
+  // undercounts whenever rows have data in other columns but a blank Title
+  // cell, which previously caused the image-path write-back to land on the
+  // wrong (unrelated) row.
+  const updatedRange = appendRes.data.updates?.updatedRange ?? '';
+  const rowMatch = updatedRange.match(/![A-Z]+(\d+)/);
+  if (!rowMatch) {
+    throw new Error(`appendRowToBlogSheet: could not parse row number from updatedRange "${updatedRange}"`);
+  }
+  const newRowIndex = parseInt(rowMatch[1], 10);
+
+  console.log(`   📄 Appended new Blogs row ${newRowIndex}: "${row.title}"`);
+  return newRowIndex;
+}
+
 // ──── Content Pool: append new rows (Title + Target URL only) ───────────
 // Appends past the last existing row — never overwrites — leaving Group
 // Assigned/Claimed At/Name/New Name/all per-platform columns blank for the
@@ -1223,6 +1467,36 @@ export async function saveUnifiedLinkedInResult(
 
   await batchWrite(sheets, data);
   console.log(`   📝 LinkedIn updated for row ${row.rowIndex}: ${result.status}`);
+}
+
+// ──── Write LinkedIn image-post result to the "LinkedinCarousel" column ───
+// Used by runLiBatch's image-post path: when a row has a locally-saved image
+// (column E / "Images URL"), the post goes out via the single-image flow
+// instead of the normal text post, and its resulting URL is written here
+// (column F / "LinkedinCarousel") instead of the usual Social URL slot.
+
+export async function saveLinkedinCarouselResult(
+  rowIndex: number,
+  result: { postUrl: string; status: string; error?: string }
+): Promise<void> {
+  const sheets = await getSheetsClient();
+  const colMap = await getColumnMap(sheets);
+
+  const posted = result.status?.toLowerCase() === 'posted';
+  const today = new Date().toISOString().split('T')[0];
+
+  const fields = [
+    { names: ['LinkedinCrousel', 'linkedincrousel', 'LinkedinCarousel', 'linkedincarousel'], value: posted ? result.postUrl : '' },
+  ];
+  if (posted) {
+    // Images URL (column E) stays filled on purpose — not cleared.
+    fields.push({ names: ['CrouselDate', 'crouseldate', 'CarouselDate', 'carouseldate', 'LiCrouselDate', 'licrouseldate'], value: today });
+  }
+
+  const data = buildUpdates(colMap, rowIndex, fields);
+
+  await batchWrite(sheets, data);
+  console.log(`   📝 LinkedinCarousel updated for row ${rowIndex}: ${result.status}`);
 }
 
 // ──── Write Medium posting result to unified sheet ────────────────────────
@@ -1772,6 +2046,45 @@ export async function getRowsNeedingSocialSlot(slot: 1 | 2, limit: number): Prom
   return results;
 }
 
+/** Rows eligible for the LinkedIn image-post flow: "Images URL" (col E) has
+ *  a local path, but "LinkedinCrousel" (col F) is still empty — i.e. an
+ *  image was generated for this row but not yet posted as a carousel image.
+ *  LinkedinCrousel getting filled on success is itself the completion
+ *  marker, so a row never gets re-picked once it's actually posted. */
+export async function getRowsNeedingLinkedinImagePost(limit: number): Promise<SheetRow[]> {
+  const sheets = await getSheetsClient();
+  const colMap = await getColumnMap(sheets);
+
+  const res = await withRetry(() => sheets.spreadsheets.values.get({
+    spreadsheetId: SHEET_ID, range: `${SHEET_NAME}!A:AZ`,
+  }), 'getRowsNeedingLinkedinImagePost');
+  const rows: string[][] = res.data.values ?? [];
+
+  const titleIdx = col(colMap, 'Title', 'title') ?? -1;
+  const targetUrlIdx = col(colMap, 'Target URL', 'target url', 'targetUrl', 'URL', 'url') ?? -1;
+  const imagesUrlIdx = col(colMap, 'Images URL', 'images url', 'Image URL', 'image url') ?? -1;
+  const carouselIdx = col(colMap, 'LinkedinCrousel', 'linkedincrousel', 'LinkedinCarousel', 'linkedincarousel') ?? -1;
+
+  if (imagesUrlIdx === -1 || carouselIdx === -1) {
+    console.warn('   ⚠️ [LI Image] "Images URL" or "LinkedinCrousel" column not found — cannot pick rows.');
+    return [];
+  }
+
+  const results: SheetRow[] = [];
+  for (let i = 1; i < rows.length && results.length < limit; i++) {
+    const row = rows[i];
+    const title = titleIdx >= 0 ? (row[titleIdx] ?? '').trim() : '';
+    const targetUrl = targetUrlIdx >= 0 ? (row[targetUrlIdx] ?? '').trim() : '';
+    const imagePath = (row[imagesUrlIdx] ?? '').trim();
+    const carouselFilled = (row[carouselIdx] ?? '').trim();
+    if (!title || !targetUrl || !imagePath || carouselFilled) continue;
+    results.push(mapRow(row, colMap, i + 1, 'social'));
+  }
+
+  console.log(`   📄 [LI Image] found ${results.length} row(s) ready`);
+  return results;
+}
+
 /** Write one platform's post result into its assigned Social Media slot. Only writes Social Platform/URL on success — a failed slot stays blank so the row can be retried by another platform in the same slot. */
 export async function saveSocialSlotResult(
   rowIndex: number,
@@ -1925,6 +2238,170 @@ export async function appendDiscoveredReportRows(rows: DiscoveredReportRow[]): P
   });
   console.log(`   📄 Appended ${rows.length} newly discovered report row(s)`);
   return rows.length;
+}
+
+// ──── RSS Extraction: raw feed landing tab ──────────────────────────────────
+// Stage 1 of a two-stage pipeline: every item the RSS watcher sees lands here
+// in full, untouched. Stage 2 (reading this tab and feeding qualifying rows
+// into Social Media / New Logic) is not built yet — deliberately separate so
+// the raw feed is captured and reviewable before that logic exists.
+
+const RSS_EXTRACTION_HEADERS = [
+  'Discovered At', 'Title', 'URL', 'Type', 'Region', 'Pub Date',
+  'Category (raw)', 'GUID', 'Description', 'Fed to Social', 'Fed to Blog',
+];
+
+export interface RssExtractionRow {
+  title: string;
+  url: string;
+  type: string;
+  region?: string;
+  pubDate: string;
+  rawCategory?: string;
+  guid?: string;
+  description?: string;
+}
+
+/** Creates the "RSS Extraction" tab with its header row if it doesn't exist yet. Safe to call repeatedly. */
+async function ensureRssExtractionSheet(sheets: any): Promise<void> {
+  const cfg = getSheetConfig('rssExtraction');
+  const meta = await withRetry(() => sheets.spreadsheets.get({
+    spreadsheetId: cfg.id,
+    fields: 'sheets(properties(sheetId,title))',
+  }), 'ensureRssExtractionSheet:meta');
+
+  const exists = meta.data.sheets?.some((s: any) => s.properties?.title === cfg.name);
+  if (exists) return;
+
+  console.log(`   📐 Creating "${cfg.name}" tab...`);
+  await withRetry(() => sheets.spreadsheets.batchUpdate({
+    spreadsheetId: cfg.id,
+    requestBody: {
+      requests: [{ addSheet: { properties: { title: cfg.name } } }],
+    },
+  }), 'ensureRssExtractionSheet:addSheet');
+
+  await withRetry(() => sheets.spreadsheets.values.update({
+    spreadsheetId: cfg.id,
+    range: `${cfg.name}!A1`,
+    valueInputOption: 'RAW',
+    requestBody: { values: [RSS_EXTRACTION_HEADERS] },
+  }), 'ensureRssExtractionSheet:headers');
+  console.log(`   ✅ "${cfg.name}" tab created with header row.`);
+}
+
+/** One-time setup: creates the "RSS Extraction" tab + header row now, without needing a new item to trigger it. Safe to call repeatedly. */
+export async function createRssExtractionTabIfMissing(): Promise<void> {
+  const sheets = await getSheetsClient();
+  await ensureRssExtractionSheet(sheets);
+}
+
+/** Reads every URL already present in the "RSS Extraction" tab (column C), as a Set for fast dedup lookups. */
+async function getExistingRssExtractionUrls(sheets: any): Promise<Set<string>> {
+  const cfg = getSheetConfig('rssExtraction');
+  const res = await withRetry(() => sheets.spreadsheets.values.get({
+    spreadsheetId: cfg.id,
+    range: `${cfg.name}!C:C`,
+  }), 'getExistingRssExtractionUrls').catch(() => ({ data: { values: [] } }));
+  const values: string[][] = res.data.values ?? [];
+  return new Set(values.slice(1).map(r => (r[0] ?? '').trim()).filter(Boolean));
+}
+
+/** Appends raw RSS feed items to the "RSS Extraction" tab, creating it first if needed. Skips any URL already present in the tab — no duplicate rows regardless of how many times the same item is pulled. */
+export async function appendRssExtractionRows(rows: RssExtractionRow[]): Promise<number> {
+  if (rows.length === 0) return 0;
+  const sheets = await getSheetsClient();
+  const cfg = getSheetConfig('rssExtraction');
+  await ensureRssExtractionSheet(sheets);
+
+  const existingUrls = await getExistingRssExtractionUrls(sheets);
+  const deduped = rows.filter(r => !existingUrls.has(r.url.trim()));
+  const skipped = rows.length - deduped.length;
+  if (skipped > 0) {
+    console.log(`   ⏭ Skipped ${skipped} row(s) already present in "${cfg.name}".`);
+  }
+  if (deduped.length === 0) return 0;
+
+  const discoveredAt = new Date().toISOString();
+  const data = deduped.map(r => [
+    discoveredAt, r.title, r.url, r.type, r.region ?? '', r.pubDate,
+    r.rawCategory ?? '', r.guid ?? '', r.description ?? '', '', '',
+  ]);
+
+  await withRetry(() => sheets.spreadsheets.values.append({
+    spreadsheetId: cfg.id,
+    range: `${cfg.name}!A:A`,
+    valueInputOption: 'RAW',
+    insertDataOption: 'INSERT_ROWS',
+    requestBody: { values: data },
+  }), 'appendRssExtractionRows');
+  console.log(`   📡 Appended ${deduped.length} row(s) to "${cfg.name}".`);
+  return deduped.length;
+}
+
+export interface UnfedRssRow {
+  rowIndex: number; // 1-based sheet row
+  title: string;
+  url: string;
+  type: string;
+  region: string;
+}
+
+/**
+ * Reads RSS Extraction rows whose `Fed to Social` / `Fed to Blog` marker
+ * (per `channel`) is still blank — i.e. never yet fed into that channel's
+ * tab. Once a row is fed, it's marked (via markRssExtractionRowsFed) and
+ * never picked again for that channel, even across restarts, until someone
+ * manually clears the marker cell.
+ */
+export async function getUnfedRssExtractionRows(channel: 'social' | 'blog', limit: number): Promise<UnfedRssRow[]> {
+  const sheets = await getSheetsClient();
+  const cfg = getSheetConfig('rssExtraction');
+  await ensureRssExtractionSheet(sheets);
+
+  const res = await withRetry(() => sheets.spreadsheets.values.get({
+    spreadsheetId: cfg.id,
+    range: `${cfg.name}!A:K`,
+  }), 'getUnfedRssExtractionRows');
+  const rows: string[][] = res.data.values ?? [];
+
+  // Fixed column layout — see RSS_EXTRACTION_HEADERS.
+  const titleIdx = 1, urlIdx = 2, typeIdx = 3, regionIdx = 4;
+  const fedIdx = channel === 'social' ? 9 : 10;
+
+  const results: UnfedRssRow[] = [];
+  for (let i = 1; i < rows.length && results.length < limit; i++) {
+    const row = rows[i];
+    const url = (row[urlIdx] ?? '').trim();
+    if (!url) continue;
+    const fed = (row[fedIdx] ?? '').trim();
+    if (fed) continue;
+    results.push({
+      rowIndex: i + 1,
+      title: (row[titleIdx] ?? '').trim(),
+      url,
+      type: (row[typeIdx] ?? '').trim(),
+      region: (row[regionIdx] ?? '').trim(),
+    });
+  }
+  return results;
+}
+
+/** Marks the given RSS Extraction rows as fed into `channel`, so they're never picked again for it. */
+export async function markRssExtractionRowsFed(rowIndexes: number[], channel: 'social' | 'blog'): Promise<void> {
+  if (rowIndexes.length === 0) return;
+  const sheets = await getSheetsClient();
+  const cfg = getSheetConfig('rssExtraction');
+  const col = channel === 'social' ? 'J' : 'K'; // Fed to Social / Fed to Blog
+  const now = new Date().toISOString();
+  const data = rowIndexes.map(rowIndex => ({
+    range: `${cfg.name}!${col}${rowIndex}`,
+    values: [[now]],
+  }));
+  await withRetry(() => sheets.spreadsheets.values.batchUpdate({
+    spreadsheetId: cfg.id,
+    requestBody: { valueInputOption: 'RAW', data },
+  }), 'markRssExtractionRowsFed');
 }
 
 // ──── Read today's rows for FB/LI batches (filtered by platform eligibility) ──
@@ -2404,6 +2881,117 @@ async function getRowsNeedingSlot(slot: 1 | 2 | 3, limit: number): Promise<Sheet
 
   console.log(`   📄 [New Logic] Slot ${slot}: found ${results.length} row(s) ready`);
   return results;
+}
+
+// ──── RSS/Distributed-URL feeder: write into New Logic (blank content) ─────
+// Writes Target URL + Title only — Blog Content stays blank for blogGenLoop
+// to fill in later. "Report Tab" records where the URL came from ("RSS" or
+// "R.P"/"R.A"/"R.S"/"R.V") purely for traceability.
+
+export interface NewLogicFeedRow {
+  url: string;
+  title: string;
+  sourceTag: string; // "RSS" or "R.P" / "R.A" / "R.S" / "R.V"
+}
+
+export async function appendNewLogicFeedRows(rows: NewLogicFeedRow[]): Promise<number> {
+  if (rows.length === 0) return 0;
+  const sheets = await getSheetsClient();
+  const sheetConfig = getSheetConfig('newLogic');
+  const colMap = await getColumnMap(sheets, sheetConfig.id, sheetConfig.name);
+
+  const urlIdx = col(colMap, 'Target URL', 'target url');
+  const titleIdx = col(colMap, 'Title', 'title');
+  const reportTabIdx = col(colMap, 'Report Tab', 'report tab');
+
+  if (urlIdx === undefined) {
+    console.warn('   ⚠️ [New Logic Feed] "Target URL" column not found — cannot append.');
+    return 0;
+  }
+
+  const maxCol = Math.max(urlIdx, titleIdx ?? 0, reportTabIdx ?? 0) + 1;
+  const data = rows.map(r => {
+    const arr = Array(maxCol).fill('');
+    arr[urlIdx] = r.url;
+    if (titleIdx !== undefined) arr[titleIdx] = r.title;
+    if (reportTabIdx !== undefined) arr[reportTabIdx] = r.sourceTag;
+    return arr;
+  });
+
+  await withRetry(() => sheets.spreadsheets.values.append({
+    spreadsheetId: sheetConfig.id,
+    range: `${sheetConfig.name}!A:A`,
+    valueInputOption: 'RAW',
+    insertDataOption: 'INSERT_ROWS',
+    requestBody: { values: data },
+  }), 'appendNewLogicFeedRows');
+  console.log(`   📄 [New Logic Feed] Appended ${rows.length} row(s).`);
+  return rows.length;
+}
+
+// ──── RSS/Distributed-URL feeder: write into Social Media (with Name) ──────
+// Writes Target URL + Title + a round-robin-assigned Name (from the same 15-
+// persona pool New Logic uses) — Social Media's own picker doesn't auto-
+// assign Name like New Logic's does, so it has to happen here at write time
+// or these rows can never actually log in to post.
+
+export interface SocialMediaFeedRow {
+  url: string;
+  title: string;
+}
+
+export async function appendSocialMediaFeedRows(rows: SocialMediaFeedRow[]): Promise<number> {
+  if (rows.length === 0) return 0;
+  const sheets = await getSheetsClient();
+  const sheetConfig = getSheetConfig('social');
+  const colMap = await getColumnMap(sheets, sheetConfig.id, sheetConfig.name);
+
+  const urlIdx = col(colMap, 'Target URL', 'target url', 'targetUrl', 'URL', 'url');
+  const titleIdx = col(colMap, 'Title', 'title');
+  const nameIdx = col(colMap, 'Name', 'name');
+
+  if (urlIdx === undefined) {
+    console.warn('   ⚠️ [Social Media Feed] "Target URL"/"targetUrl" column not found — cannot append.');
+    return 0;
+  }
+
+  // Continue the round-robin from however many rows already have a Name, same pattern as getRowsNeedingSlot.
+  let assignedCount = 0;
+  if (nameIdx !== undefined) {
+    const existing = await withRetry(() => sheets.spreadsheets.values.get({
+      spreadsheetId: sheetConfig.id,
+      range: `${sheetConfig.name}!A:A`,
+    }), 'appendSocialMediaFeedRows:countRows');
+    const totalRows = (existing.data.values?.length ?? 1) - 1;
+    if (totalRows > 0) {
+      const nameCol = await withRetry(() => sheets.spreadsheets.values.get({
+        spreadsheetId: sheetConfig.id,
+        range: `${sheetConfig.name}!${colToLetter(nameIdx)}2:${colToLetter(nameIdx)}${totalRows + 1}`,
+      }), 'appendSocialMediaFeedRows:nameColumn');
+      assignedCount = (nameCol.data.values ?? []).filter(r => (r[0] ?? '').trim()).length;
+    }
+  }
+
+  const maxCol = Math.max(urlIdx, titleIdx ?? 0, nameIdx ?? 0) + 1;
+  const data = rows.map((r, i) => {
+    const arr = Array(maxCol).fill('');
+    arr[urlIdx] = r.url;
+    if (titleIdx !== undefined) arr[titleIdx] = r.title;
+    if (nameIdx !== undefined) {
+      arr[nameIdx] = NEW_LOGIC_ACCOUNT_NAMES_15[(assignedCount + i) % NEW_LOGIC_ACCOUNT_NAMES_15.length];
+    }
+    return arr;
+  });
+
+  await withRetry(() => sheets.spreadsheets.values.append({
+    spreadsheetId: sheetConfig.id,
+    range: `${sheetConfig.name}!A:A`,
+    valueInputOption: 'RAW',
+    insertDataOption: 'INSERT_ROWS',
+    requestBody: { values: data },
+  }), 'appendSocialMediaFeedRows');
+  console.log(`   📄 [Social Media Feed] Appended ${rows.length} row(s).`);
+  return rows.length;
 }
 
 // Medium shares slot 1 of the New Logic 3-slot system with Linkmate,

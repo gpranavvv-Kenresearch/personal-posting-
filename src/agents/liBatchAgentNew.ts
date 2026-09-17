@@ -40,10 +40,7 @@ export async function runLiBatchAgent(params: {
     const account = liAccounts[i];
     const row = params.rows[i];
 
-    const pdfPath = (row.imagesUrl || '').trim();
-    const postResult = pdfPath
-      ? await postToLiAccountCarousel(account.nickname || account.handle, row.linkedinPost || '', pdfPath)
-      : await postToLiAccount(account.nickname || account.handle, row.linkedinPost || '');
+    const postResult = await postToLiAccount(account.nickname || account.handle, row.linkedinPost || '');
 
     result.results.push({
       nickname: account.nickname || account.handle,
@@ -65,31 +62,6 @@ export async function runLiBatchAgent(params: {
   }
 
   return result;
-}
-
-/**
- * Post to single LI account with carousel PDF
- */
-async function postToLiAccountCarousel(nickname: string, postText: string, pdfPath: string): Promise<{
-  success: boolean;
-  postUrl?: string;
-  error?: string;
-}> {
-  try {
-    console.log(`   [Carousel] PDF path: ${pdfPath}`);
-    const loginResult = await executeBrowserTool('login_linkedin', { nickname });
-    if (!loginResult.success) {
-      return { success: false, error: loginResult.error || 'Login failed' };
-    }
-    const postResult = await executeBrowserTool('post_linkedin_carousel', { nickname, postText, pdfPath });
-    return {
-      success: postResult.success ?? false,
-      postUrl: postResult.postUrl,
-      error: postResult.error,
-    };
-  } catch (err: any) {
-    return { success: false, error: err.message };
-  }
 }
 
 /**

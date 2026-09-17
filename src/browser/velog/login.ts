@@ -4,6 +4,7 @@ import fs from 'fs';
 import 'dotenv/config';
 import { createInterface } from 'readline/promises';
 import { killChromeForProfile } from '../../utils/killChrome.js';
+import { safeCloseContext } from '../../utils/safeClose.js';
 
 // TODO(locators): velog login is typically GitHub OAuth (velog.io/login →
 // github.com/login → redirect back). Confirm whether email/password login is
@@ -44,13 +45,11 @@ function sessionDirFor(nickname: string): string {
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
 let browserContext: BrowserContext | null = null;
+let currentSessionDir: string | null = null;
 
 export async function closeVelogBrowser(): Promise<void> {
-  if (browserContext) {
-    await browserContext.close().catch(() => {});
-    browserContext = null;
-    console.log('   Velog browser closed.');
-  }
+  await safeCloseContext(browserContext, { label: 'Velog', sessionDir: currentSessionDir });
+  browserContext = null;
 }
 
 // Confirmed against the logged-in velog.io homepage: a "Write a new post"
@@ -84,6 +83,7 @@ export async function loginToVelog(options?: { nickname?: string; interactive?: 
 
   const chromePath = process.env.CHROME_PATH || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
   const sessionDir = account.sessionDir ? path.resolve(account.sessionDir) : sessionDirFor(account.nickname || account.email || 'default');
+  currentSessionDir = sessionDir;
 
   fs.mkdirSync(sessionDir, { recursive: true });
   await killChromeForProfile(sessionDir);

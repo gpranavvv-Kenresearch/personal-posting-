@@ -1543,6 +1543,11 @@ async function generateViaChatGptWithFallback(platform: 'fb' | 'li', params: { u
 export const MAX_POST_LENGTH = 3000;
 const MAX_LENGTH_ATTEMPTS = 3;
 
+// FB/LI posts must land in this band — under TARGET_MIN_LENGTH or at/over
+// TARGET_MAX_LENGTH both get rejected and regenerated.
+const TARGET_MIN_LENGTH = 1700;
+const TARGET_MAX_LENGTH = 2200;
+
 // Neither Facebook nor LinkedIn renders **markdown** bold in native posts —
 // literal asterisks just show up as asterisks. Real Unicode "Mathematical
 // Bold" characters are separate codepoints that display as true bold in any
@@ -1769,7 +1774,25 @@ function reconstructFbCta(block: string): string {
 }
 
 function ensureSectionSpacing(text: string): string {
-  const lines = text.split('\n').map((l) => l.trim()).filter((l) => l !== '');
+  const rawLines = text.split('\n').map((l) => l.trim()).filter((l) => l !== '');
+  if (rawLines.length === 0) return text;
+
+  // The model sometimes writes a numbered marker as its own bare line ("2.")
+  // with the point's actual sentence on the next line/paragraph instead of
+  // right after it (confirmed live: "2." alone, then a blank line, then "The
+  // global industrial automation market...", with the number and its content
+  // ending up as two separate, unlabeled blocks once split below). Re-attach
+  // a bare "N." marker to whatever line immediately follows it before any
+  // other classification runs.
+  const lines: string[] = [];
+  for (let j = 0; j < rawLines.length; j++) {
+    if (/^\d+\.$/.test(rawLines[j]) && j + 1 < rawLines.length) {
+      lines.push(`${rawLines[j]} ${rawLines[j + 1]}`);
+      j++;
+    } else {
+      lines.push(rawLines[j]);
+    }
+  }
   if (lines.length === 0) return text;
 
   const isBullet = (l: string) => l.startsWith('•');
@@ -1829,6 +1852,41 @@ function ensureSectionSpacing(text: string): string {
         i++;
         continue;
       }
+      // Single-sentence numbered point (the common case, and the intended
+      // format per the prompt) — push it whole. Falling through to the
+      // plain-paragraph rule below would be wrong: that rule's own sentence-
+      // boundary scan matches the leading "N. " marker itself (digit, period,
+      // space, capital letter — indistinguishable from a real sentence end),
+      // severing the number from its own content (confirmed live: "2." ends
+      // up alone with the actual point text orphaned as the next block).
+      blocks.push(line);
+      i++;
+      continue;
+    }
+    // A plain (non-numbered, non-bullet) paragraph — e.g. the "strategic
+    // interpretation" sentence(s) glued straight onto the closing "sharp
+    // question" sentence with no break, both riding on the same line
+    // (confirmed live: "...invested capital. The key question is not
+    // whether..." never got separated because neither sentence has a
+    // numbered/bullet marker for the checks above to hook onto). Once a
+    // paragraph runs long enough to plausibly be two merged sentences, split
+    // its LAST sentence into its own block — the closer/question is what
+    // should stand out on its own line regardless of the model's exact
+    // wording, so this doesn't hardcode any particular phrase.
+    if (line.length > 160) {
+      const sentenceBoundaries = [...line.matchAll(/\.\s+(?=[A-Z])/g)];
+      const lastBoundary = sentenceBoundaries[sentenceBoundaries.length - 1];
+      if (lastBoundary) {
+        const splitAt = lastBoundary.index! + lastBoundary[0].length;
+        const head = line.slice(0, splitAt).trim();
+        const tail = line.slice(splitAt).trim();
+        if (head && tail) {
+          blocks.push(head);
+          blocks.push(tail);
+          i++;
+          continue;
+        }
+      }
     }
     blocks.push(line);
     i++;
@@ -1874,7 +1932,11 @@ function ensureSectionSpacing(text: string): string {
 
 function finalizeOutput(text: string, platform?: 'fb' | 'li'): string {
   let out = ensureBulletListSpacing(ensureNumberedListSpacing(stripEmDashes(convertMarkdownBoldToUnicode(text))));
-  if (platform === 'fb') out = ensureSectionSpacing(out);
+  // Safe for LI too now — each numbered point is one blended sentence (no
+  // more separate "Decision-maker implication:" companion line to keep
+  // glued to it), so ensureSectionSpacing's per-line blank-separated-block
+  // rebuild + numbered-point spillover cut applies the same way FB's does.
+  if (platform === 'fb' || platform === 'li') out = ensureSectionSpacing(out);
   return ensureStructuralLineBreaks(out);
 }
 
@@ -2016,7 +2078,7 @@ const LI_STYLES = [
 - Never use "we", "our", or "at Ken Research"; mention Ken Research only as the primary source
 - Use one engagement angle: contrarian ("attractive, but not every segment deserves capital"), boardroom question, capital allocation, risk-validation, or whitespace framing`,
     hook: 'Opening – a decision-maker hook such as "For decision-makers evaluating [market], the headline market size is only the first layer" or "Before allocating capital to [market], decision-makers need to separate market growth from investable growth."',
-    sections: `2. Decision-relevant facts – exactly 4-5 numbered points, each: a factual statement with year/number from the web data, followed by a one-line "Decision-maker implication:"
+    sections: `2. Decision-relevant facts – exactly 4-5 numbered points, each ONE natural sentence that blends the factual statement (year/number from web data) with what it means for a decision-maker — write it as flowing analysis, not a fact followed by a separate labeled line
 3. Strategic interpretation – 1-2 sentences on where market attractiveness is increasing, where whitespace opportunities are forming, and which risks need validation
 4. Decision-maker question – one sharp sentence, e.g. "The key question is not whether the market is growing. The key question is which segment is attractive, scalable, defensible, and financially viable."`,
     ctaVerb: 'For decision-makers evaluating this market, read the executive summary here',
@@ -2028,7 +2090,7 @@ const LI_STYLES = [
 - Attribute data using phrasing like "Ken Research data indicates…", "According to Ken Research market data…", or "Ken Research identifies…"
 - Create tension between market size and commercial viability, growth and defensibility, or opportunity and execution risk`,
     hook: 'Opening – a decision-maker hook such as "The [market] market cannot be evaluated only through CAGR" or "Market size confirms relevance. It does not confirm pricing power, margin potential, or defensible entry." Follow with the factual market size/CAGR figure and its year from the web data.',
-    sections: `2. Decision-relevant signals – exactly 4-5 numbered points, each with a factual statement (number/year from web data) and a one-line decision-maker implication (entry, pricing, margin, risk, capital allocation)
+    sections: `2. Decision-relevant signals – exactly 4-5 numbered points, each ONE natural sentence that blends the factual statement (number/year from web data) with its decision-maker implication (entry, pricing, margin, risk, capital allocation) — no fixed label, write it as one flowing thought
 3. Strategic interpretation – 1-2 sentences on where market attractiveness and whitespace opportunities are forming, and which risks affect entry or expansion
 4. Sharp question – one sentence on which segment is attractive, scalable, defensible, and financially viable — not just whether the market is growing`,
     ctaVerb: 'For decision-makers evaluating this market, review the full market breakdown here',
@@ -2040,7 +2102,7 @@ const LI_STYLES = [
 - Attribute data using phrasing like "Ken Research data places…", "Ken Research identifies…", or "Primary market source: Ken Research."
 - Core message: market size confirms relevance, not where to enter, how to win, or where capital should be deployed`,
     hook: 'Opening – a 2-line scroll-stopper such as "The risk is not missing the market. The risk is reading it late." or "A market can be attractive and still be entered wrongly." followed by one setup line naming the market and the question beyond size.',
-    sections: `2. Signals – exactly 3-4 numbered points, each: a factual statement (number/year from web data), then "This matters because…" and "The mistake would be…" lines
+    sections: `2. Signals – exactly 3-4 numbered points, each ONE natural sentence that blends the factual statement (number/year from web data) with why it matters and the risk of misreading it — no fixed labels or repeated phrases across points, vary the wording point to point
 3. Decision-risk lens – 1-2 sentences contrasting the wrong lens (market size, CAGR, broad demand) with the better lens (demand depth, segment attractiveness, competition benchmarking, operational and financial viability)
 4. Boardroom line – one sharp sentence, e.g. "The cost of an outdated market view is not only missed growth. It is misallocated capital."`,
     ctaVerb: 'For decision-makers refreshing their market view, review the full market breakdown here',
@@ -2060,24 +2122,22 @@ export async function generateFbPost(params: {
   priority: string;
 }): Promise<string> {
   let bestNoPlaceholder = '';
-  let shortest = '';
+  let bestNoPlaceholderDist = Infinity;
+  let closest = '';
+  let closestDist = Infinity;
   for (let attempt = 1; attempt <= MAX_LENGTH_ATTEMPTS; attempt++) {
-    // Shrink the target on each retry so the model actually converges under
-    // MAX_POST_LENGTH instead of overshooting the same soft target again.
-    const targetMax = attempt === 1 ? 2000 : attempt === 2 ? 1700 : 1450;
-    const output = await generateFbPostRaw(params, targetMax);
+    const output = await generateFbPostRaw(params, TARGET_MAX_LENGTH);
     const placeholder = hasUnfilledPlaceholder(output);
-    if (!shortest || output.length < shortest.length) shortest = output;
-    if (!placeholder && (!bestNoPlaceholder || output.length < bestNoPlaceholder.length)) bestNoPlaceholder = output;
-    if (!placeholder && output.length <= MAX_POST_LENGTH) return finalizeOutput(output, 'fb');
-    console.warn(`   ⚠️  FB post attempt ${attempt}/${MAX_LENGTH_ATTEMPTS} rejected (${placeholder ? 'unfilled placeholder' : `${output.length} chars, over ${MAX_POST_LENGTH}`}) — regenerating`);
+    const dist = output.length < TARGET_MIN_LENGTH ? TARGET_MIN_LENGTH - output.length
+      : output.length > TARGET_MAX_LENGTH ? output.length - TARGET_MAX_LENGTH : 0;
+    if (dist < closestDist) { closest = output; closestDist = dist; }
+    if (!placeholder && dist < bestNoPlaceholderDist) { bestNoPlaceholder = output; bestNoPlaceholderDist = dist; }
+    if (!placeholder && output.length >= TARGET_MIN_LENGTH && output.length <= TARGET_MAX_LENGTH) return finalizeOutput(output, 'fb');
+    console.warn(`   ⚠️  FB post attempt ${attempt}/${MAX_LENGTH_ATTEMPTS} rejected (${placeholder ? 'unfilled placeholder' : `${output.length} chars, outside ${TARGET_MIN_LENGTH}-${TARGET_MAX_LENGTH}`}) — regenerating`);
   }
-  if (bestNoPlaceholder) {
-    console.warn(`   ⚠️  FB post still over ${MAX_POST_LENGTH} chars after ${MAX_LENGTH_ATTEMPTS} attempts — hard-trimming the shortest placeholder-free attempt (${bestNoPlaceholder.length} chars)`);
-    return finalizeOutput(hardTrimToLimit(bestNoPlaceholder, MAX_POST_LENGTH), 'fb');
-  }
-  console.warn(`   ⚠️  FB post still has an unfilled placeholder after ${MAX_LENGTH_ATTEMPTS} attempts — hard-trimming the shortest attempt (${shortest.length} chars)`);
-  return finalizeOutput(hardTrimToLimit(shortest, MAX_POST_LENGTH), 'fb');
+  const fallback = bestNoPlaceholder || closest;
+  console.warn(`   ⚠️  FB post still outside ${TARGET_MIN_LENGTH}-${TARGET_MAX_LENGTH} chars after ${MAX_LENGTH_ATTEMPTS} attempts — using closest attempt (${fallback.length} chars)${fallback.length > TARGET_MAX_LENGTH ? ', hard-trimming' : ''}`);
+  return finalizeOutput(fallback.length > TARGET_MAX_LENGTH ? hardTrimToLimit(fallback, TARGET_MAX_LENGTH) : fallback, 'fb');
 }
 
 async function generateFbPostRaw(params: {
@@ -2154,7 +2214,7 @@ STRICT RULES:
 - Do not mention "report", "study", or "analysis" in the body
 - Wrap every mention of "Ken Research" in **double asterisks** (e.g. **Ken Research**), and wrap every specific number/%/CAGR/dollar figure the same way (e.g. **37.52%**, **USD 4.2 billion**) — these become bold text on Facebook. Do not bold anything else — no full sentences, no headers.
 - No emojis, no other markdown, no special characters, no em dashes
-- HARD LIMIT: your entire output, including the CTA and URL, must be under ${targetMax} characters. Count as you write. This is a strict cap, not a suggestion — going over means the post gets rejected outright. Shorter is fine; do not pad to fill space.
+- LENGTH: your entire output, including the CTA and URL, must be between ${TARGET_MIN_LENGTH} and ${targetMax} characters total — not shorter than ${TARGET_MIN_LENGTH}, not longer than ${targetMax}. Count as you write. If you're running short, add another specific data point or a fuller interpretation sentence to reach the range — do not pad with filler or repeat a point.
 - Output ONLY the post text, nothing else
 
 URL: ${params.url}`;
@@ -2178,24 +2238,22 @@ export async function generateLiPost(params: {
   priority: string;
 }): Promise<string> {
   let bestNoPlaceholder = '';
-  let shortest = '';
+  let bestNoPlaceholderDist = Infinity;
+  let closest = '';
+  let closestDist = Infinity;
   for (let attempt = 1; attempt <= MAX_LENGTH_ATTEMPTS; attempt++) {
-    // Shrink the target on each retry so the model actually converges under
-    // MAX_POST_LENGTH instead of overshooting the same soft target again.
-    const targetMax = attempt === 1 ? 2000 : attempt === 2 ? 1700 : 1450;
-    const output = await generateLiPostRaw(params, targetMax);
+    const output = await generateLiPostRaw(params, TARGET_MAX_LENGTH);
     const placeholder = hasUnfilledPlaceholder(output);
-    if (!shortest || output.length < shortest.length) shortest = output;
-    if (!placeholder && (!bestNoPlaceholder || output.length < bestNoPlaceholder.length)) bestNoPlaceholder = output;
-    if (!placeholder && output.length <= MAX_POST_LENGTH) return finalizeOutput(output);
-    console.warn(`   ⚠️  LI post attempt ${attempt}/${MAX_LENGTH_ATTEMPTS} rejected (${placeholder ? 'unfilled placeholder' : `${output.length} chars, over ${MAX_POST_LENGTH}`}) — regenerating`);
+    const dist = output.length < TARGET_MIN_LENGTH ? TARGET_MIN_LENGTH - output.length
+      : output.length > TARGET_MAX_LENGTH ? output.length - TARGET_MAX_LENGTH : 0;
+    if (dist < closestDist) { closest = output; closestDist = dist; }
+    if (!placeholder && dist < bestNoPlaceholderDist) { bestNoPlaceholder = output; bestNoPlaceholderDist = dist; }
+    if (!placeholder && output.length >= TARGET_MIN_LENGTH && output.length <= TARGET_MAX_LENGTH) return finalizeOutput(output, 'li');
+    console.warn(`   ⚠️  LI post attempt ${attempt}/${MAX_LENGTH_ATTEMPTS} rejected (${placeholder ? 'unfilled placeholder' : `${output.length} chars, outside ${TARGET_MIN_LENGTH}-${TARGET_MAX_LENGTH}`}) — regenerating`);
   }
-  if (bestNoPlaceholder) {
-    console.warn(`   ⚠️  LI post still over ${MAX_POST_LENGTH} chars after ${MAX_LENGTH_ATTEMPTS} attempts — hard-trimming the shortest placeholder-free attempt (${bestNoPlaceholder.length} chars)`);
-    return finalizeOutput(hardTrimToLimit(bestNoPlaceholder, MAX_POST_LENGTH));
-  }
-  console.warn(`   ⚠️  LI post still has an unfilled placeholder after ${MAX_LENGTH_ATTEMPTS} attempts — hard-trimming the shortest attempt (${shortest.length} chars)`);
-  return finalizeOutput(hardTrimToLimit(shortest, MAX_POST_LENGTH));
+  const fallback = bestNoPlaceholder || closest;
+  console.warn(`   ⚠️  LI post still outside ${TARGET_MIN_LENGTH}-${TARGET_MAX_LENGTH} chars after ${MAX_LENGTH_ATTEMPTS} attempts — using closest attempt (${fallback.length} chars)${fallback.length > TARGET_MAX_LENGTH ? ', hard-trimming' : ''}`);
+  return finalizeOutput(fallback.length > TARGET_MAX_LENGTH ? hardTrimToLimit(fallback, TARGET_MAX_LENGTH) : fallback, 'li');
 }
 
 async function generateLiPostRaw(params: {
@@ -2258,11 +2316,11 @@ Engagement question for readers?
 RULES:
 ${banRule}
 - No emojis, no special characters
-- Wrap every mention of "Ken Research" in **double asterisks** (e.g. **Ken Research**), and wrap every specific number/%/CAGR/dollar figure the same way (e.g. **37.52%**, **USD 4.2 billion**) — these become bold text on LinkedIn. Do not bold anything else (no full sentences, no headers).
+- Wrap every mention of "Ken Research" in **double asterisks** (e.g. **Ken Research**), and wrap EVERY specific number/%/CAGR/dollar figure the same way (e.g. **37.52%**, **USD 4.2 billion**), with no exceptions — check each numbered point again before output and bold any figure you missed the first time. Do not bold anything else (no full sentences, no headers).
 - The executive summary/report should feel like supporting evidence, not the main subject — do not sound like an advertisement
 - Use the exact URL given above — do not shorten, rewrite, or remove it; only one link in the whole post
 - 3-5 hashtags on the last line, space-separated, always including #KenResearch
-- HARD LIMIT: your entire output, including the CTA and URL, must be under ${targetMax} characters. Count as you write. This is a strict cap, not a suggestion — going over means the post gets rejected outright. Shorter is fine; do not pad to fill space.
+- LENGTH: your entire output, including the CTA and URL, must be between ${TARGET_MIN_LENGTH} and ${targetMax} characters total — not shorter than ${TARGET_MIN_LENGTH}, not longer than ${targetMax}. Count as you write. If you're running short, add another specific data point or a fuller interpretation sentence to reach the range — do not pad with filler or repeat a point.
 - Output ONLY the post text, nothing else`;
 
   return await callLLMWithRetry(prompt, 1600);

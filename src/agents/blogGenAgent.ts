@@ -39,11 +39,11 @@ const DEFAULT_BLOG_ACCOUNT = 'account1';
 
 const CHROME_PATH = process.env.CHROME_PATH || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
 
-// Blog generation is slow (~12-15 min) — this is a much longer budget than
-// promptRunner.ts's 2-minute RESPONSE_TIMEOUT_MS, which is sized for short
-// social-post replies, not full articles.
-const RESPONSE_TIMEOUT_MS = 30 * 60 * 1000; // hard cap 30 min
-const POLL_MS = 60 * 1000; // check every 1 min (after the first 5-min wait)
+// Blog generation is slow (~5-15 min, varies) — no way to know in advance
+// how long a given article will take, so just poll once a minute and stop
+// as soon as completion is detected, capped at MAX_POLLS as a hard ceiling.
+const POLL_MS = 60 * 1000; // check every 1 min
+const MAX_POLLS = 15; // 15 checks * 1 min = 15 min total hard cap
 
 /**
  * The master SERP/AI-citation blog prompt — fully self-contained: does its
@@ -468,7 +468,8 @@ CANONICAL_BLOG_URL:
 BREADCRUMB_PARENT_URL:
 CMS_GENERATES_SCHEMA: YES
 </INPUTS>
-BEGIN NOW. Your reply must contain only the deliverable defined under FINAL RESPONSE — no acknowledgement, no plan, no questions.`;
+You already have everything required to complete this task: REPORT_URL to browse and research yourself, and full authority to search the open web for supporting data. Never respond by asking for the report content, market data, permission, or access to be provided to you — that data does not exist anywhere except through your own research of REPORT_URL and the open web, exactly as every rule above already instructs. A reply that asks for data/permission/access instead of researching and writing is a failed response, identical to an acknowledgement, a plan, or a question.
+BEGIN NOW. Your reply must contain only the deliverable defined under FINAL RESPONSE — no acknowledgement, no plan, no questions, and no request for data, permission, or access.`;
 }
 
 /**
@@ -892,7 +893,8 @@ CANONICAL_BLOG_URL:
 BREADCRUMB_PARENT_URL:
 CMS_GENERATES_SCHEMA: YES
 </INPUTS>
-BEGIN NOW. Your reply must contain only the deliverable defined under FINAL RESPONSE — no acknowledgement, no plan, no questions.`;
+You already have everything required to complete this task: REPORT_URL to browse and research yourself, and full authority to search the open web for supporting data. Never respond by asking for the report content, market data, permission, or access to be provided to you — that data does not exist anywhere except through your own research of REPORT_URL and the open web, exactly as every rule above already instructs. A reply that asks for data/permission/access instead of researching and writing is a failed response, identical to an acknowledgement, a plan, or a question.
+BEGIN NOW. Your reply must contain only the deliverable defined under FINAL RESPONSE — no acknowledgement, no plan, no questions, and no request for data, permission, or access.`;
 }
 
 // ChatGPT's rate-limit / session-nudge popups can appear at any point during
@@ -924,6 +926,29 @@ async function clearPopups(page: Page): Promise<void> {
   }
 }
 
+const POPUP_WATCHER_INTERVAL_MS = 1500;
+
+/**
+ * Runs dismissBlockingModals() on its own short cycle for the ENTIRE
+ * lifetime of the ChatGPT tab — independent of waitForBlogCompletion's
+ * 60s poll (POLL_MS), which also doesn't run at all during its first fixed
+ * 5-minute wait. Popups (rate-limit/session-nudge/upgrade dialogs) can
+ * reappear within seconds and block typing/streaming until dismissed;
+ * confirmed live 2026-09-16 that the previous once-a-minute-at-best checking
+ * left them sitting long enough to need a manual click. Call the returned
+ * stop function in a `finally` so this never outlives the page/context.
+ */
+function startContinuousPopupWatcher(page: Page): () => void {
+  let stopped = false;
+  (async () => {
+    while (!stopped) {
+      await dismissBlockingModals(page).catch(() => {});
+      await page.waitForTimeout(POPUP_WATCHER_INTERVAL_MS);
+    }
+  })().catch(() => {});
+  return () => { stopped = true; };
+}
+
 /** Wait until the assistant response finished streaming (send re-enabled, text stable). */
 async function waitForBlogCompletion(page: Page): Promise<void> {
   const start = Date.now();
@@ -931,12 +956,15 @@ async function waitForBlogCompletion(page: Page): Promise<void> {
   let lastLength = -1;
   let unchangedChecks = 0;
   let tinyStallChecks = 0;
-  await page.waitForTimeout(5 * 60 * 1000); // let generation get underway (~5 min) before first check
-  while (Date.now() - start < RESPONSE_TIMEOUT_MS) {
+  // Generation takes anywhere from ~5 to ~15 min with no way to know in
+  // advance — so just wait 1 min, check, repeat, up to MAX_POLLS times
+  // (~15 min total), instead of guessing a blind upfront wait.
+  for (let poll = 1; poll <= MAX_POLLS; poll++) {
+    await page.waitForTimeout(POLL_MS);
     await clearPopups(page);
     const stopping = await page.locator(STOP_BUTTON_SELECTOR).first().isVisible({ timeout: 2000 }).catch(() => false);
     const text = await lastAssistantText(page);
-    console.log(`   …checked at ${Math.round((Date.now() - start) / 60000)} min: ${stopping ? 'still writing' : 'looks finished'} (${text.length} characters so far)`);
+    console.log(`   …check ${poll}/${MAX_POLLS} at ${Math.round((Date.now() - start) / 60000)} min: ${stopping ? 'still writing' : 'looks finished'} (${text.length} characters so far)`);
     if (!stopping && text.length > 500) {
       goneChecks++;
       if (goneChecks >= 2) return; // Stop button gone for ~2 checks → done
@@ -973,7 +1001,6 @@ async function waitForBlogCompletion(page: Page): Promise<void> {
       tinyStallChecks = 0;
     }
     lastLength = text.length;
-    await page.waitForTimeout(POLL_MS);
   }
 }
 
@@ -1010,18 +1037,35 @@ async function extractBlog(page: Page, fallbackTitle: string): Promise<{ title: 
   const titleMatch = text.match(/^\s*Title:\s*(.+)$/im);
   const descMatch = text.match(/^\s*Description:\s*(.+)$/im);
 
+  // The model is told to keep the "Description:" line plain text with no
+  // HTML tags, but sometimes wraps it in stray angle brackets anyway (e.g.
+  // "<Description: ...>"). Searching the WHOLE text for the first "<" then
+  // picks that up as if it were the start of the article HTML and publishes
+  // it verbatim — a browser renders "<Description: word1 word2...>" as a
+  // bogus tag with each word turned into a boolean attribute, which is
+  // exactly the garbled text that showed up live at the top of a post
+  // (confirmed 2026-09-16). Only search for the HTML fragment AFTER the
+  // matched Description line so a leak like that can never be included.
+  const htmlSearchText = descMatch ? text.slice((descMatch.index ?? 0) + descMatch[0].length) : text;
+
   let html = '';
   if (data.code && data.code.includes('<')) {
     html = data.code.trim();
   } else {
     // Raw HTML in the message text: from the first tag to the last tag (drops
     // any trailing page chrome like "ChatGPT can make mistakes" / "Sources").
-    const firstTag = text.indexOf('<');
-    html = firstTag >= 0 ? text.slice(firstTag) : text;
+    const firstTag = htmlSearchText.indexOf('<');
+    html = firstTag >= 0 ? htmlSearchText.slice(firstTag) : htmlSearchText;
     const lastTag = html.lastIndexOf('>');
     if (lastTag >= 0) html = html.slice(0, lastTag + 1);
     html = html.trim();
   }
+
+  // Defense-in-depth: strip a leaked "Description: ..." line/tag if it still
+  // ended up at the very start of the extracted HTML some other way (e.g. it
+  // was inside the code-block branch above, which isn't covered by the fix
+  // above since that branch doesn't use htmlSearchText).
+  html = html.replace(/^<?\s*Description:\s*[^<\n]*>?\s*/i, '');
 
   // ARTICLE_HTML mode returns ONLY the HTML fragment — no "Title:"/"Description:"
   // lines. Fall back to pulling those straight out of the HTML itself.
@@ -1152,6 +1196,7 @@ export async function generateBlogViaChatGpt(params: {
     ],
   });
 
+  let stopPopupWatcher: () => void = () => {};
   try {
     const page = context.pages()[0] ?? await context.newPage();
     await minimizeToTaskbar(context, page);
@@ -1161,6 +1206,8 @@ export async function generateBlogViaChatGpt(params: {
     if (!(await waitUntilLoggedIn(page))) {
       throw new Error(`ChatGPT (account "${accountName}"): not logged in and manual login was not completed in time.`);
     }
+
+    stopPopupWatcher = startContinuousPopupWatcher(page);
 
     const prompt = params.promptVersion === 'v2'
       ? buildMasterBlogPromptV2(params.title, params.url)
@@ -1233,6 +1280,16 @@ export async function generateBlogViaChatGpt(params: {
       throw new Error(`RESEARCH_BLOCKED: ChatGPT could not verify the primary report page for "${params.title}" (${params.url}) — check the URL is reachable and correct.`);
     }
 
+    // The prompt's LINK ARCHITECTURE rules require 12-14 Ken Research link
+    // placements across 5-7 unique cluster destinations; ChatGPT is told to
+    // return exactly this sentence (nothing else) when it can't verify
+    // enough of them — detect it explicitly so the caller can retry with a
+    // fresh browser instead of it falling through to the generic
+    // "No HTML content extracted" failure below.
+    if (html.includes('LINK VALIDATION BLOCKED')) {
+      throw new Error(`LINK_VALIDATION_BLOCKED: ChatGPT could not verify 12+ Ken Research link placements for "${params.title}" (${params.url}).`);
+    }
+
     if (!html || html.length < 100) {
       throw new Error('No HTML content extracted from ChatGPT response');
     }
@@ -1248,6 +1305,7 @@ export async function generateBlogViaChatGpt(params: {
     if (rotated) err.message = `${err.message} (rotated out — next attempt uses "${account}")`;
     throw err;
   } finally {
+    stopPopupWatcher();
     await context.close().catch(() => {});
   }
 }

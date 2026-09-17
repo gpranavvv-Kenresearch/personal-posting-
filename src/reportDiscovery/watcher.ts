@@ -1,7 +1,9 @@
 import { fetchSitemap } from './sitemapClient.js';
-import { SITEMAP_SOURCES, ContentType, isDuplicateSlug, extractRegionFromSlug } from './sources.js';
+import { SITEMAP_SOURCES, ContentType, isDuplicateSlug, extractRegionFromSlug, contentTypeFromRssCategory } from './sources.js';
 import { isBootstrap, loadSeenStore, saveSeenStore, SeenStore } from './seenStore.js';
 import { fetchReportMdSummary } from './mdEnrichment.js';
+import { fetchRssFeed } from './rssClient.js';
+import { getLastPollDate, setLastPollDate } from './rssPollState.js';
 
 export interface DiscoveredItem {
   url: string;
@@ -144,4 +146,88 @@ export async function runReportWatcher(opts?: {
 
   console.log(`   📡 [ReportWatcher] ${bootstrap ? 'BOOTSTRAP' : 'poll'}: ${newItems.length} new, ${updatedItems.length} updated (today ${todayIso()})`);
   return { bootstrap, new: newItems, updated: updatedItems };
+}
+
+// ── RSS feed watcher (Tech Team endpoint, live 2026-09-15) ───────────────────
+
+export interface RssDiscoveredItem {
+  url: string;
+  title: string;
+  type: ContentType;
+  region: string;
+  /** "YYYY-MM-DD", from the feed's pubDate. */
+  date: string;
+  /** Raw fields kept for the RSS Extraction tab (full-fidelity capture). */
+  guid: string;
+  description: string;
+  rawCategory: string;
+}
+
+export interface RssWatchResult {
+  since: string;
+  new: RssDiscoveredItem[];
+  skippedUnknownCategory: number;
+}
+
+/**
+ * Poll the Tech Team RSS feed (kenresearch.com/feed/newly-published.xml),
+ * diff against the SAME seen-store the sitemap watcher uses (both are keyed
+ * by canonical URL, so a URL either source has already recorded is never
+ * re-added by the other), and return genuinely new items.
+ *
+ * Unlike the sitemap watcher, the feed already provides a real title and
+ * description (not slug-derived), so no .md-twin enrichment or mismatch
+ * guard is needed here.
+ */
+export async function runRssReportWatcher(): Promise<RssWatchResult> {
+  const seen: SeenStore = loadSeenStore();
+  const since = getLastPollDate();
+
+  let items;
+  try {
+    items = await fetchRssFeed({ since });
+  } catch (err: any) {
+    console.warn(`   ⚠️  [RssWatcher] Feed fetch failed: ${err.message}`);
+    return { since, new: [], skippedUnknownCategory: 0 };
+  }
+
+  const newItems: RssDiscoveredItem[] = [];
+  let skippedUnknownCategory = 0;
+
+  for (const item of items) {
+    if (isDuplicateSlug(item.url)) continue;
+
+    const type = contentTypeFromRssCategory(item.category);
+    if (!type) {
+      skippedUnknownCategory++;
+      console.warn(`   ⚠️  [RssWatcher] Unknown category "${item.category}" for ${item.url} — skipped (add it to RSS_CATEGORY_TO_TYPE in sources.ts once confirmed)`);
+      continue;
+    }
+
+    const existing = seen[item.url];
+    if (!existing) {
+      newItems.push({
+        url: item.url,
+        title: item.title,
+        type,
+        region: extractRegionFromSlug(item.url),
+        date: item.pubDate,
+        guid: item.guid,
+        description: item.description,
+        rawCategory: item.category,
+      });
+    }
+
+    seen[item.url] = {
+      lastmod: item.pubDate,
+      type,
+      firstSeenAt: existing?.firstSeenAt ?? new Date().toISOString(),
+    };
+  }
+
+  saveSeenStore(seen);
+  setLastPollDate(todayIso());
+
+  console.log(`   📡 [RssWatcher] poll (since ${since}): ${newItems.length} new${skippedUnknownCategory ? `, ${skippedUnknownCategory} skipped (unknown category)` : ''}`);
+  return { since, new: newItems, skippedUnknownCategory };
 }

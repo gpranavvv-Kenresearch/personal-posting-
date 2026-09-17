@@ -17,26 +17,73 @@ import { Page } from 'playwright';
 import { COMPOSER_SELECTOR } from '../browser/chatgpt/login.js';
 
 /**
- * Remove ChatGPT's blocking overlay modals (e.g. the "conversation history
- * rate limit" dialog) from the DOM. This is a live React app — the modal can
- * re-render itself seconds after being removed if the underlying condition
- * (rate limit, session nudge, etc.) is still true, so call this again right
- * before EVERY click that could be intercepted, not just once up front.
- * Returns true if a modal was found and removed.
+ * Remove ChatGPT's blocking overlay modals/dialogs from the DOM. This is a
+ * live React app — a modal can re-render itself seconds after being removed
+ * if the underlying condition (rate limit, session nudge, upgrade prompt,
+ * etc.) is still true, so call this again right before EVERY click that
+ * could be intercepted, not just once up front. Returns true if anything was
+ * found and dismissed.
+ *
+ * Covers two shapes:
+ *  1. The one named modal ChatGPT is known to render for the conversation-
+ *     history rate limit — removed directly from the DOM.
+ *  2. Any OTHER generic ARIA dialog/alertdialog (session nudges, upgrade
+ *     offers, "stay signed in", etc. — the exact markup varies and isn't all
+ *     known) — try a close/dismiss button first, then Escape, then Enter as
+ *     a last resort for keyboard-confirm-only dialogs.
+ * Confirmed live 2026-09-16: only handling shape (1) left other popups to
+ * accumulate for up to a minute (the caller's own poll interval) or require
+ * a manual click during ~12-15 min blog generation.
  */
 export async function dismissBlockingModals(page: Page): Promise<boolean> {
-  const removed = await page.evaluate(() => {
+  const removedNamed = await page.evaluate(() => {
     const modal = document.querySelector(
       '#modal-conversation-history-rate-limit, [data-testid="modal-conversation-history-rate-limit"]'
     );
     if (modal) { modal.remove(); return true; }
     return false;
   });
-  if (removed) {
+  if (removedNamed) {
     console.log('   [composer] Removed blocking modal from DOM');
     await page.waitForTimeout(300);
   }
-  return removed;
+
+  let removedGeneric = false;
+  const dialog = page.locator('[role="dialog"], [role="alertdialog"]').first();
+  if (await dialog.isVisible({ timeout: 500 }).catch(() => false)) {
+    const dismissButton = dialog.locator(
+      'button[aria-label="Close"], button:has-text("Close"), button:has-text("Got it"), button:has-text("OK"), button:has-text("Not now"), button:has-text("Skip"), button:has-text("Dismiss")'
+    ).first();
+    if (await dismissButton.isVisible({ timeout: 500 }).catch(() => false)) {
+      await dismissButton.click().catch(() => {});
+    } else {
+      await page.keyboard.press('Escape').catch(() => {});
+      await page.waitForTimeout(200);
+      if (await dialog.isVisible({ timeout: 300 }).catch(() => false)) {
+        await page.keyboard.press('Enter').catch(() => {});
+      }
+    }
+    removedGeneric = true;
+    await page.waitForTimeout(300);
+    console.log('   [composer] Dismissed a generic dialog/overlay popup');
+  }
+
+  // Page-wide fallback, not scoped to [role="dialog"]/[role="alertdialog"]:
+  // confirmed live 2026-09-16 that ChatGPT's "Too many requests" rate-limit
+  // popup (title "Too many requests", body "You're making requests too
+  // quickly...", a "Got it" button) needed a manual click — so its container
+  // may not carry either role. Click any visible "Got it" button directly,
+  // wherever it is in the DOM.
+  let removedGotIt = false;
+  const gotItButton = page.getByRole('button', { name: 'Got it', exact: true }).first();
+  if (await gotItButton.isVisible({ timeout: 500 }).catch(() => false)) {
+    await gotItButton.click().catch(() => {});
+    removedGotIt = true;
+    await page.waitForTimeout(300);
+    console.log('   [composer] Dismissed "Got it" popup (e.g. ChatGPT rate-limit notice)');
+  }
+
+  return removedNamed || removedGeneric || removedGotIt;
 }
 
 export async function pasteIntoChatGptComposer(

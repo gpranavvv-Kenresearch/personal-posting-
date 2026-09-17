@@ -16,11 +16,11 @@
  */
 
 import { generateBlogViaChatGpt } from '../agents/blogGenAgent.js';
-import { generateBlogCoverImage } from '../agents/blogImageAgent.js';
+import { generateBlogCoverImageWithText } from '../agents/blogImageAgent.js';
 import { runBlogSanityChecks } from '../agents/blogSanityAgent.js';
 import { validateBrandAuthority } from '../agents/blogBrandValidator.js';
 import { applyPreferredSourceCTA, validatePreferredSourceCTA, PreferredSourceMode } from '../agents/blogPreferredSourceAgent.js';
-import { getContentPoolRowsNeedingGeneration, saveGeneratedBlogToPool, saveCoverImageUrlToPool, getSheetRowByIndex } from '../sheets/sheets.js';
+import { getContentPoolRowsNeedingGeneration, saveGeneratedBlogToPool, saveCoverImageUrlToPool, saveNewLogicImageText, getSheetRowByIndex } from '../sheets/sheets.js';
 
 // 'tracked' by default — lets us start collecting Preferred Source CTA Click
 // data from day one (can't back-fill it later). Switch to 'direct' here (or
@@ -29,10 +29,9 @@ import { getContentPoolRowsNeedingGeneration, saveGeneratedBlogToPool, saveCover
 const PREFERRED_SOURCE_MODE: PreferredSourceMode = 'tracked';
 
 /** Force the cover image into the article HTML — replaces a model-written <img> if any, else prepends one. */
-function injectCoverImage(html: string, imageUrl: string, altText: string): string {
+function injectCoverImage(html: string, imageUrl: string): string {
   if (!imageUrl) return html;
-  const alt = altText.replace(/"/g, '&quot;');
-  const imgTag = `<img src="${imageUrl}" alt="${alt} market research"/>`;
+  const imgTag = `<img src='${imageUrl}'>`;
   return /<img\b[^>]*>/i.test(html) ? html.replace(/<img\b[^>]*>/i, imgTag) : `${imgTag}\n${html}`;
 }
 
@@ -87,12 +86,27 @@ export async function runBlogGenBatch(opts: BlogGenBatchOptions = {}): Promise<{
     let attemptsLeft = retryOnVerifyFail ? 2 : 1;
     let rowOk = false;
 
-    // Cover image lives OUTSIDE the retry loop: once generated (this attempt,
-    // a previous attempt, or a previous pass that already wrote it to the
-    // sheet), it is reused — the ~9-min image generation never re-runs just
-    // because the blog side failed validation and is being retried.
-    let coverImageUrl = (row.coverImageUrl || '').trim();
-    if (coverImageUrl) console.log(`   Reusing existing cover image from sheet: ${coverImageUrl}`);
+    // "Blocked" verdicts — LINK_VALIDATION_BLOCKED (ChatGPT couldn't verify
+    // 12+ Ken Research link placements), RESEARCH_BLOCKED (couldn't verify
+    // the primary report page), and PREAMBLE_ONLY (ChatGPT replied with an
+    // acknowledgement/question instead of the article, even after the
+    // in-agent "proceed" nudge) — get their own shared retry budget,
+    // independent of attemptsLeft above: close the browser, reopen, resend
+    // the identical prompt, up to MAX_BLOCKED_RETRIES times, then give up on
+    // this row explicitly instead of silently falling into generic retries.
+    const BLOCKED_ERROR_PREFIXES = ['LINK_VALIDATION_BLOCKED', 'RESEARCH_BLOCKED', 'PREAMBLE_ONLY'];
+    let blockedRetries = 0;
+    const MAX_BLOCKED_RETRIES = 2;
+
+    // Always generate a fresh cover image — never reuse whatever is already
+    // saved in the sheet's Cover Image URL column from a previous run
+    // (2026-09-16: doing that was silently skipping image generation
+    // entirely, opening only the blog's Chrome window). Still reused WITHIN
+    // this row's own retry attempts below — once generated on attempt 1, a
+    // blog-text-only retry (attempt 2) won't regenerate it, since the
+    // up-to-15-min image generation has no reason to re-run just because the blog
+    // side failed validation.
+    let coverImageUrl = '';
 
     while (attemptsLeft > 0 && !rowOk) {
       attemptsLeft--;
@@ -110,20 +124,23 @@ export async function runBlogGenBatch(opts: BlogGenBatchOptions = {}): Promise<{
           // concurrently — two separate, independent browser contexts.
           console.log(`   Opening 2 parallel Chrome windows (blog + image)...`);
           const [imgResult, blogResult] = await Promise.all([
-            generateBlogCoverImage({
+            generateBlogCoverImageWithText({
               marketName: title,
               reportUrl: row.targetUrl,
               promptChoice: opts.imagePromptChoice ?? '1',
               accountHandle: opts.imageAccountHandle,
             })
-              .then(async (url) => {
+              .then(async ({ url, imageText }) => {
                 // Write the image URL to the sheet the moment it exists —
-                // don't wait for the blog, which may still fail/retry.
+                // don't wait for the blog, which may still fail/retry. The
+                // image text is purely observational (New Logic!Z) — never
+                // let it block or fail this step.
                 if (url) {
                   coverImageUrl = url;
                   await saveCoverImageUrlToPool(row, url, 'newLogic').catch((e: any) =>
                     console.log(`   ⚠️ Could not save cover image URL immediately (will be saved with the blog): ${e.message}`));
                 }
+                if (imageText) await saveNewLogicImageText(row, imageText);
                 return url;
               })
               .catch((imgErr: any) => {
@@ -139,7 +156,7 @@ export async function runBlogGenBatch(opts: BlogGenBatchOptions = {}): Promise<{
           blog = await generateBlogViaChatGpt({ title, url: row.targetUrl, accountHandle: opts.blogAccountHandle, promptVersion });
         }
 
-        const htmlWithImage = coverImageUrl ? injectCoverImage(blog.html, coverImageUrl, title) : blog.html;
+        const htmlWithImage = coverImageUrl ? injectCoverImage(blog.html, coverImageUrl) : blog.html;
 
         const sanity = runBlogSanityChecks(htmlWithImage, { title });
         if (sanity.changes.length > 0) {
@@ -175,7 +192,21 @@ export async function runBlogGenBatch(opts: BlogGenBatchOptions = {}): Promise<{
           console.log(`   ⚠️ Verification failed: ${verdict.reason}${attemptsLeft > 0 ? ' — retrying this row...' : ' — giving up on this row.'}`);
         }
       } catch (err: any) {
-        console.log(`   ❌ Row ${row.rowIndex} failed: ${err.message}${attemptsLeft > 0 ? ' — retrying...' : ' — giving up on this row.'}`);
+        const blockedPrefix = typeof err.message === 'string'
+          ? BLOCKED_ERROR_PREFIXES.find((p) => err.message.startsWith(p))
+          : undefined;
+        if (blockedPrefix) {
+          blockedRetries++;
+          if (blockedRetries > MAX_BLOCKED_RETRIES) {
+            console.log(`   ❌ Row ${row.rowIndex}: ${blockedPrefix} persisted after ${MAX_BLOCKED_RETRIES} retries — skipping this row.`);
+            attemptsLeft = 0;
+          } else {
+            console.log(`   ⚠️ Row ${row.rowIndex}: ${blockedPrefix} (retry ${blockedRetries}/${MAX_BLOCKED_RETRIES}) — reopening ChatGPT and resending...`);
+            attemptsLeft = Math.max(attemptsLeft, 1);
+          }
+        } else {
+          console.log(`   ❌ Row ${row.rowIndex} failed: ${err.message}${attemptsLeft > 0 ? ' — retrying...' : ' — giving up on this row.'}`);
+        }
       }
     }
 

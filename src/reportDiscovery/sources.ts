@@ -55,6 +55,31 @@ const REGION_TOKENS = [
   'australia', 'turkey', 'poland', 'europe', 'asia', 'africa', 'global',
 ];
 
+// Maps the RSS feed's <category> text (confirmed live 2026-09-15: "Report",
+// "Article", "Survey" seen so far; "POV"/"Case Study" expected per the feed's
+// own <description> but not yet observed) to this pipeline's ContentType.
+// Note the feed's `?type=` query param values (e.g. "product") do NOT match
+// the <category> text it returns (e.g. "Report") — this map is keyed on the
+// returned <category>, not the query param.
+const RSS_CATEGORY_TO_TYPE: Record<string, ContentType> = {
+  report: 'report',
+  article: 'article',
+  survey: 'survey',
+  pov: 'pov',
+  'pov/insight': 'pov',
+  'pov / insight': 'pov',
+  insight: 'pov',
+  casestudy: 'casestudy',
+  'case study': 'casestudy',
+  benchmarking: 'benchmarking',
+  'competition benchmarking': 'benchmarking',
+};
+
+/** Returns null (rather than guessing) for a category the feed sends that isn't mapped yet. */
+export function contentTypeFromRssCategory(category: string): ContentType | null {
+  return RSS_CATEGORY_TO_TYPE[category.trim().toLowerCase()] ?? null;
+}
+
 export function extractRegionFromSlug(url: string): string {
   const slug = url.split('/').filter(Boolean).pop() ?? '';
   const normalized = slug.toLowerCase();

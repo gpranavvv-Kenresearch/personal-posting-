@@ -3,6 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import 'dotenv/config';
 import { killChromeForProfile } from '../../utils/killChrome.js';
+import { safeCloseContext } from '../../utils/safeClose.js';
 
 // TODO(locators): coda.io login supports Google OAuth and email magic-link.
 // Confirm which flow the automation accounts use and update CODA_LOGIN_URL /
@@ -43,13 +44,11 @@ function sessionDirFor(nickname: string): string {
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
 let browserContext: BrowserContext | null = null;
+let currentSessionDir: string | null = null;
 
 export async function closeCodaBrowser(): Promise<void> {
-  if (browserContext) {
-    await browserContext.close().catch(() => {});
-    browserContext = null;
-    console.log('   Coda browser closed.');
-  }
+  await safeCloseContext(browserContext, { label: 'Coda', sessionDir: currentSessionDir });
+  browserContext = null;
 }
 
 function pageLooksLoggedIn(url: string): boolean {
@@ -89,6 +88,7 @@ export async function loginToCoda(options?: { nickname?: string }): Promise<Page
 
   const chromePath = process.env.CHROME_PATH || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
   const sessionDir = account.sessionDir ? path.resolve(account.sessionDir) : sessionDirFor(account.nickname || account.email || 'default');
+  currentSessionDir = sessionDir;
 
   fs.mkdirSync(sessionDir, { recursive: true });
   await killChromeForProfile(sessionDir);

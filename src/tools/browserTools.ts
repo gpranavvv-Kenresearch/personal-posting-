@@ -12,7 +12,7 @@ import { loginToFacebook } from '../browser/facebook/login.js';
 import { postToFacebook } from '../browser/facebook/poster.js';
 import { loginToLinkedIn } from '../browser/linkedin/login.js';
 import { postToLinkedIn } from '../browser/linkedin/poster.js';
-import { postToLinkedInCarousel } from '../browser/linkedin/carouselPoster.js';
+import { postToLinkedInWithImage } from '../browser/linkedin/imagePoster.js';
 import { postToCalisthenics } from '../browser/calisthenics/poster.js';
 import { postToSubstack } from '../browser/substack/poster.js';
 import { loginToSubstack, closeSubstackBrowser, getSubstackAccountByNickname, getActiveSubstackAccount } from '../browser/substack/login.js';
@@ -652,8 +652,8 @@ export async function executeBrowserTool(toolName: string, input: Record<string,
     if (toolName === 'post_linkedin') {
       return await postLiTool(input.nickname, input.postText);
     }
-    if (toolName === 'post_linkedin_carousel') {
-      return await postLiCarouselTool(input.nickname, input.postText, input.pdfPath);
+    if (toolName === 'post_linkedin_image') {
+      return await postLiImageTool(input.nickname, input.postText, input.imagePath);
     }
     if (toolName === 'login_hackmd') {
       return await loginHackmdTool(input.nickname);
@@ -926,13 +926,14 @@ async function postLiTool(nickname: string, postText: string): Promise<any> {
   }
 }
 
-async function postLiCarouselTool(nickname: string, postText: string, pdfPath: string): Promise<any> {
+async function postLiImageTool(nickname: string, postText: string, imagePath: string): Promise<any> {
   const myPage = liPages.get(nickname);
   try {
     if (!myPage) {
       return { error: 'Not logged in. Call login_linkedin first.', success: false };
     }
-    const result = await postToLinkedInCarousel(myPage, postText, pdfPath);
+
+    const result = await postToLinkedInWithImage(myPage, postText, imagePath);
     return { success: true, postUrl: result.postUrl, postText: result.postText };
   } catch (err: any) {
     return { error: err.message, success: false };
@@ -941,7 +942,7 @@ async function postLiCarouselTool(nickname: string, postText: string, pdfPath: s
       try {
         await myPage.context().close();
       } catch (e) {
-        console.warn(`Failed to close LI carousel browser (${nickname}):`, e);
+        console.warn(`Failed to close LI image browser (${nickname}):`, e);
       }
       if (liPages.get(nickname) === myPage) liPages.delete(nickname);
     }
@@ -1515,7 +1516,7 @@ let notionNickname: string | null = null;
 
 async function loginNotionTool(nickname: string): Promise<any> {
   try {
-    notionPage = await loginToNotion({ nickname, headless: false });
+    notionPage = await loginToNotion({ nickname, headless: true });
     notionNickname = nickname;
     return { success: true, message: `Logged in to Notion (${nickname})` };
   } catch (err: any) {

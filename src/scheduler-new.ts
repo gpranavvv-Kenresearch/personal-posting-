@@ -28,7 +28,7 @@
  *      each; Tumblr ×2/day) run at :05/:35 minute offsets, and the new slot
  *      platforms above run at :10/:20/:25/:40/:50 offsets — both interleaved
  *      with the :00/:15/:30/:45 grid below so nothing collides.
- *   6. Telegraph (×2/day, 11:20 & 13:50) shares the Social Media tab's slot 2
+ *   6. Telegraph (×3/day, 11:20, 13:50 & 15:50) shares the Social Media tab's slot 2
  *      columns with Facebook/Tumblr/Pearltrees (see runTelegraphBatch in
  *      masterCoordinator.ts) — no login/accounts, browser-only, added
  *      2026-09-08.
@@ -50,8 +50,9 @@ import {
   runPearltreesBatch, runPdfhostBatch, runInstapaperBatch,
   runRaindropBatch, runTumblrBatch, runTelegraphBatch,
   runMediumBatch, runVelogBatch, runGoogleSiteBatch,
-  runFourSharedBatch,
+  runFourSharedBatch, runReportDiscoveryBatch,
 } from './coordinator/masterCoordinator.js';
+import { runNightlyRssFeed } from './coordinator/rssFeeder.js';
 
 function runGroup(name: string) {
   const def = GROUP_DEFS[name];
@@ -95,7 +96,7 @@ export const DAILY_SLOTS: DailySlot[] = [
   { time: '11:05', label: 'PdfHost 1/3',           run: () => runPdfhostBatch(1) },
   { time: '11:10', label: 'Google Sites 1/3',      run: () => runGoogleSiteBatch(1) },
   { time: '11:15', label: 'HackMD 1/2',            run: () => runHackmdBatch(1) },
-  { time: '11:20', label: 'Telegraph 1/2',         run: () => runTelegraphBatch(1) },
+  { time: '11:20', label: 'Telegraph 1/3',         run: () => runTelegraphBatch(1) },
   { time: '11:30', label: 'LI Batch 1',            run: () => runLiBatch(undefined, 1) },
   { time: '11:35', label: 'Instapaper 1/3',        run: () => runInstapaperBatch(1) },
   { time: '11:45', label: 'Blogger 1/2',           run: () => runBloggerBatch(1) },
@@ -113,7 +114,7 @@ export const DAILY_SLOTS: DailySlot[] = [
   { time: '13:30', label: 'WordPress 1/1',         run: () => runWordpressBatch(1) },
   { time: '13:35', label: 'PdfHost 2/3',           run: () => runPdfhostBatch(2) },
   { time: '13:45', label: 'FB Batch 3',            run: () => runFbBatch(3) },
-  { time: '13:50', label: 'Telegraph 2/2',         run: () => runTelegraphBatch(2) },
+  { time: '13:50', label: 'Telegraph 2/3',         run: () => runTelegraphBatch(2) },
   { time: '14:00', label: 'LI Batch 2',            run: () => runLiBatch(undefined, 2) },
   { time: '14:05', label: 'Instapaper 2/3',        run: () => runInstapaperBatch(2) },
   { time: '14:15', label: 'Linkmate 2/2',          run: () => runLinkmateBatch(2) },
@@ -127,6 +128,7 @@ export const DAILY_SLOTS: DailySlot[] = [
   { time: '15:30', label: 'FB Batch 4',            run: () => runFbBatch(4) },
   { time: '15:35', label: 'Pearltrees 3/3',        run: () => runPearltreesBatch(3) },
   { time: '15:45', label: 'Group4b',               run: runGroup('Group4b') },
+  { time: '15:50', label: 'Telegraph 3/3',         run: () => runTelegraphBatch(3) },
   { time: '16:00', label: 'Blogger 2/2',           run: () => runBloggerBatch(2) },
   { time: '16:05', label: 'PdfHost 3/3',           run: () => runPdfhostBatch(3) },
   { time: '16:10', label: 'Google Sites 3/3',      run: () => runGoogleSiteBatch(3) },
@@ -162,6 +164,20 @@ export async function startCoordinatorDaemon(): Promise<void> {
     console.log(`\n[${nowIst()}] Midnight — resetting daily batch counters`);
     resetBatchCounters();
   }, { timezone: tz });
+
+  // ── Report discovery (RSS feed poll) ──────────────────────────────────────
+  // Not a once-per-day slot: this is idempotent (dedup via the shared
+  // seen-store + since=<lastPoll>) and should keep detecting newly published
+  // content all day, so it runs on its own interval outside the ledger —
+  // every 30 min, 10:00-18:59 IST, ahead of the 10:20 first posting batch.
+  cron.schedule('*/30 10-18 * * *', wrap('Report Discovery (RSS)', runReportDiscoveryBatch), { timezone: tz });
+
+  // ── Nightly RSS/Distributed-URL feed + blog generation: 18:30 IST ─────────
+  // After the day's last posting batch (18:00 slot). Feeds New Logic (100/day
+  // quota) + Social Media (200/day quota) from unfed RSS Extraction rows,
+  // falling back to the Distributed URL pool (R.P->R.A->R.S->R.V) if short,
+  // then generates blog content for whatever just landed in New Logic.
+  cron.schedule('30 18 * * *', wrap('Nightly RSS Feed', runNightlyRssFeed), { timezone: tz });
 
   // ── Weekly SERP recheck: Saturday 10 PM IST ───────────────────────────────
   cron.schedule('0 22 * * 6', wrap('Weekly SERP Recheck', runWeeklySerpRecheck), { timezone: tz });
@@ -207,9 +223,9 @@ export async function startCoordinatorDaemon(): Promise<void> {
   console.log('  18:20 │ Daily Posting Summary (report + Algo Reports!F write)');
   console.log('  ──────┼─────────────────────────────────────────────────────');
   console.log('  New SBM/PPT-PDF platforms (:05/:35 offsets, interleaved with the grid above):');
-  console.log('  10:35 Pearltrees 1/3 │ 11:05 PdfHost 1/3 │ 11:20 Telegraph 1/2 │ 11:35 Instapaper 1/3 │ 12:05 Raindrop 1/3 │ 12:35 Tumblr 1/2');
-  console.log('  13:05 Pearltrees 2/3 │ 13:35 PdfHost 2/3 │ 13:50 Telegraph 2/2 │ 14:05 Instapaper 2/3 │ 14:35 Raindrop 2/3 │ 15:05 Tumblr 2/2');
-  console.log('  15:35 Pearltrees 3/3 │ 16:05 PdfHost 3/3 │ 16:35 Instapaper 3/3 │ 17:05 Raindrop 3/3');
+  console.log('  10:35 Pearltrees 1/3 │ 11:05 PdfHost 1/3 │ 11:20 Telegraph 1/3 │ 11:35 Instapaper 1/3 │ 12:05 Raindrop 1/3 │ 12:35 Tumblr 1/2');
+  console.log('  13:05 Pearltrees 2/3 │ 13:35 PdfHost 2/3 │ 13:50 Telegraph 2/3 │ 14:05 Instapaper 2/3 │ 14:35 Raindrop 2/3 │ 15:05 Tumblr 2/2');
+  console.log('  15:35 Pearltrees 3/3 │ 15:50 Telegraph 3/3 │ 16:05 PdfHost 3/3 │ 16:35 Instapaper 3/3 │ 17:05 Raindrop 3/3');
   console.log('  ──────┼─────────────────────────────────────────────────────');
   console.log('  Medium/Velog (slot 1), Google Sites/PdfHost (slot 2), 4shared (slot 3) — :10/:20/:25/:40/:50 offsets:');
   console.log('  10:20 Medium 1/1      │ 10:40 Velog 1/2       │ 11:10 Google Sites 1/3');

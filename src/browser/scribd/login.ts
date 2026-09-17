@@ -4,6 +4,7 @@ import fs from 'fs';
 import 'dotenv/config';
 import { createInterface } from 'readline/promises';
 import { killChromeForProfile } from '../../utils/killChrome.js';
+import { safeCloseContext } from '../../utils/safeClose.js';
 import { waitForPageReady } from '../stagehand.js';
 
 // Confirmed live (2026-08-18): Scribd's login form actually lives on
@@ -48,13 +49,11 @@ function sessionDirFor(nickname: string): string {
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
 let browserContext: BrowserContext | null = null;
+let currentSessionDir: string | null = null;
 
 export async function closeScribdBrowser(): Promise<void> {
-  if (browserContext) {
-    await browserContext.close().catch(() => {});
-    browserContext = null;
-    console.log('   Scribd browser closed.');
-  }
+  await safeCloseContext(browserContext, { label: 'Scribd', sessionDir: currentSessionDir });
+  browserContext = null;
 }
 
 async function isLoggedIn(page: Page): Promise<boolean> {
@@ -78,6 +77,7 @@ async function waitForEnter(promptText: string): Promise<void> {
 }
 
 async function launchContext(sessionDir: string): Promise<Page> {
+  currentSessionDir = sessionDir;
   fs.mkdirSync(sessionDir, { recursive: true });
   await killChromeForProfile(sessionDir);
 

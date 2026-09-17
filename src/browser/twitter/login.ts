@@ -5,9 +5,11 @@ import path from 'path';
 import fs from 'fs';
 import 'dotenv/config';
 import { killChromeForProfile } from '../../utils/killChrome.js';
+import { safeCloseContext } from '../../utils/safeClose.js';
 
 let browserContext: BrowserContext | null = null;
 let loginPage: Page | null = null;
+let currentSessionDir: string | null = null;
 
 export async function closeBrowser() {
   // Close via persistent context — properly flushes cookies to disk before closing
@@ -15,15 +17,13 @@ export async function closeBrowser() {
     await loginPage.close().catch(() => {});
     loginPage = null;
   }
-  if (browserContext) {
-    await browserContext.close().catch(() => {});
-    browserContext = null;
-  }
-  console.log('   Browser closed.');
+  await safeCloseContext(browserContext, { label: 'X', sessionDir: currentSessionDir });
+  browserContext = null;
 }
 
 async function launchPersistentChrome(profileDir: string): Promise<{ context: BrowserContext; page: Page }> {
   const chromePath = process.env.CHROME_PATH || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+  currentSessionDir = profileDir;
   fs.mkdirSync(profileDir, { recursive: true });
   await killChromeForProfile(profileDir);
 

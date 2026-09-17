@@ -3,6 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import 'dotenv/config';
 import { killChromeForProfile } from '../../utils/killChrome';
+import { safeCloseContext } from '../../utils/safeClose.js';
 
 const SUBSTACK_ACCOUNTS_FILE = '.accounts/accounts-substack.json';
 const SESSION_ROOT = path.resolve('.sessions/substack');
@@ -37,13 +38,11 @@ function sessionDirFor(email: string): string {
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
 let browserContext: BrowserContext | null = null;
+let currentSessionDir: string | null = null;
 
 export async function closeSubstackBrowser(): Promise<void> {
-  if (browserContext) {
-    await browserContext.close().catch(() => {});
-    browserContext = null;
-    console.log('   Substack browser closed.');
-  }
+  await safeCloseContext(browserContext, { label: 'Substack', sessionDir: currentSessionDir });
+  browserContext = null;
 }
 
 export async function loginToSubstack(options?: {
@@ -60,6 +59,7 @@ export async function loginToSubstack(options?: {
 
   const chromePath = process.env.CHROME_PATH || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
   const sessionDir = account.sessionDir ? path.resolve(account.sessionDir) : sessionDirFor(account.nickname || account.email || 'default');
+  currentSessionDir = sessionDir;
 
   fs.mkdirSync(sessionDir, { recursive: true });
 

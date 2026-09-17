@@ -3,6 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import 'dotenv/config';
 import { killChromeForProfile } from '../../utils/killChrome';
+import { safeCloseContext } from '../../utils/safeClose.js';
 
 const PARAGRAPH_ACCOUNTS_FILE = '.accounts/accounts-paragraph.json';
 const SESSION_ROOT = path.resolve('.sessions/paragraph');
@@ -36,13 +37,11 @@ function sessionDirFor(nickname: string): string {
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
 let browserContext: BrowserContext | null = null;
+let currentSessionDir: string | null = null;
 
 export async function closeParagraphBrowser(): Promise<void> {
-  if (browserContext) {
-    await browserContext.close().catch(() => {});
-    browserContext = null;
-    console.log('   Paragraph browser closed.');
-  }
+  await safeCloseContext(browserContext, { label: 'Paragraph', sessionDir: currentSessionDir });
+  browserContext = null;
 }
 
 export async function loginToParagraph(options?: {
@@ -60,6 +59,7 @@ export async function loginToParagraph(options?: {
   const sessionDir = account.sessionDir
     ? path.resolve(account.sessionDir)
     : sessionDirFor(options?.nickname || account.nickname || account.email);
+  currentSessionDir = sessionDir;
 
   fs.mkdirSync(sessionDir, { recursive: true });
 

@@ -3,6 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import 'dotenv/config';
 import { killChromeForProfile } from '../../utils/killChrome.js';
+import { safeCloseContext } from '../../utils/safeClose.js';
 
 const DEVTO_ACCOUNTS_FILE = '.accounts/accounts-devto.json';
 
@@ -31,13 +32,11 @@ export function getDevtoAccountByNickname(nickname: string): DevtoAccount | null
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
 let browserContext: BrowserContext | null = null;
+let currentSessionDir: string | null = null;
 
 export async function closeDevtoBrowser(): Promise<void> {
-  if (browserContext) {
-    await browserContext.close().catch(() => {});
-    browserContext = null;
-    console.log('   Dev.to browser closed.');
-  }
+  await safeCloseContext(browserContext, { label: 'Dev.to', sessionDir: currentSessionDir });
+  browserContext = null;
 }
 
 async function isLoggedInToDevto(page: Page): Promise<boolean> {
@@ -138,6 +137,7 @@ export async function loginToDevto(options?: {
   }
 
   const sessionDir = path.resolve(account.sessionDir);
+  currentSessionDir = sessionDir;
   const chromePath = process.env.CHROME_PATH || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
 
   // Create session dir if it doesn't exist yet (fresh account)

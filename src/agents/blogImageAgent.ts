@@ -26,6 +26,7 @@ import { uploadFileToGoogleDrive } from '../utils/googleDriveUpload.js';
 const COMPOSER_SELECTOR = '#prompt-textarea';
 const LOGIN_BUTTON_SELECTOR = 'button:has-text("Log in"), a:has-text("Log in")';
 const MANUAL_LOGIN_TIMEOUT_MS = 120_000;
+const ASSISTANT_MESSAGE_SELECTOR = '[data-message-author-role="assistant"]';
 
 // Dedicated account for cover-IMAGE generation — kept separate from
 // blogGenAgent.ts's default account so the two always run in separate
@@ -45,11 +46,10 @@ const SEND_SELECTORS = [
 // local sector/color logic needed.
 function imagePrompt1(name: string, reportUrl: string): string {
   return `Act as a senior market researcher and premium editorial data-visualization designer.
-Your task is to independently research the supplied market, validate its most important statistics, select an industry-appropriate visual identity, and create a production-ready market-intelligence cover image inspired by the supplied reference image.
+Your task is to independently research the supplied market, validate its most important statistics, select an industry-appropriate visual identity, and create a production-ready market-intelligence cover image.
 USER INPUT
 Market/Report Title: "${name}"
 Primary Report URL: "${reportUrl}"
-Reference Image: "https://lh3.googleusercontent.com/d/13G9f9b25YxH3UUniIzHYaBBK3zPo3Dzf"
 Current Year: Use the actual current year.
 Do not ask the user to supply market values, CAGR, forecast figures, statistics, colors, or visual concepts. Research and select them yourself.
 PHASE 1: MARKET RESEARCH
@@ -145,7 +145,7 @@ Contemporary
 Photorealistic
 Executive-grade
 Suitable for LinkedIn, report promotion, and corporate publishing
-Use the reference image only as structural inspiration. Do not copy its products, text, statistics, map, branding, or exact design.
+Follow the canvas architecture and layout rules below directly — do not copy products, text, statistics, maps, branding, or exact designs from any outside source.
 CANVAS ARCHITECTURE
 Left information zone: approximately 38–42%.
 Center and right hero zone: approximately 58–62%.
@@ -531,16 +531,17 @@ function buildImagePrompt(name: string, reportUrl: string, promptChoice: string)
   return promptChoice === '2' ? imagePrompt2(name, reportUrl) : imagePrompt1(name, reportUrl);
 }
 
-// ── Multi-selector image finder (polls every 2s, up to 9 min) ─────────────
-// When the image generates at all it always shows up within ~100s (observed across every
-// successful run); when it doesn't, it never shows up late — it just burns the full timeout
-// before failing. 3 min gives real generations comfortable margin without wasting ~6 more
-// minutes per row waiting on one that was never going to land.
-async function findGeneratedImage(page: Page, timeout = 3 * 60 * 1000): Promise<{ src: string; naturalWidth: number; naturalHeight: number }> {
-  const deadline = Date.now() + timeout;
+// ── Multi-selector image finder (waits 1 min, checks, repeats up to 15x) ──
+// Generation time varies and there's no way to know it in advance, so just
+// wait 1 min, check, repeat — up to MAX_POLLS times (~15 min total hard cap)
+// — instead of guessing a fixed timeout.
+const POLL_MS = 60 * 1000;
+const MAX_POLLS = 15;
+async function findGeneratedImage(page: Page): Promise<{ src: string; naturalWidth: number; naturalHeight: number }> {
   const started = Date.now();
-  let lastLogAt = 0;
-  while (Date.now() < deadline) {
+  for (let poll = 1; poll <= MAX_POLLS; poll++) {
+    await page.waitForTimeout(POLL_MS);
+
     const found = await page.evaluate(() => {
       const imgs = Array.from(document.querySelectorAll('img'));
       const candidates = imgs.filter((img: any) => Math.max(img.naturalWidth || 0, img.naturalHeight || 0) >= 800);
@@ -555,13 +556,20 @@ async function findGeneratedImage(page: Page, timeout = 3 * 60 * 1000): Promise<
     }
 
     const elapsed = Math.round((Date.now() - started) / 1000);
-    if (elapsed - lastLogAt >= 20) {
-      console.log(`   Waiting for image... (${elapsed}s elapsed)`);
-      lastLogAt = elapsed;
-    }
-    await page.waitForTimeout(2000);
+    console.log(`   …check ${poll}/${MAX_POLLS} at ${elapsed}s: no image yet`);
   }
   throw new Error('Generated image not found after timeout (no img with naturalWidth/Height >= 800)');
+}
+
+// Best-effort capture of whatever text ChatGPT wrote alongside the image
+// (research notes, a validation summary, etc.) — purely observational for
+// now (written to New Logic!Z "Image text" so it can be reviewed over the
+// next few days), never allowed to fail or block image generation itself.
+async function lastAssistantText(page: Page): Promise<string> {
+  return page.evaluate((sel) => {
+    const msgs = document.querySelectorAll(sel);
+    return msgs.length ? ((msgs[msgs.length - 1] as HTMLElement).innerText || '') : '';
+  }, ASSISTANT_MESSAGE_SELECTOR).catch(() => '');
 }
 
 async function trySendClick(page: Page): Promise<boolean> {
@@ -609,23 +617,26 @@ async function waitUntilLoggedIn(page: Page): Promise<boolean> {
 }
 
 /**
- * Generate a market-report cover image via ChatGPT (DALL-E 3), download it,
- * and upload to Google Drive for a public URL. Launches its own persistent
- * Chrome context (session dir per account) — independent of blogGenAgent.ts's
- * browser, so the two can run at the same time via Promise.all instead of
- * fighting over one shared browser/page.
+ * Core generation: sends the cover-image prompt to ChatGPT (DALL-E 3), waits
+ * for the image, downloads it, and saves it to `outputDir` (defaults to
+ * generated_images/). Returns the local path only — no upload. Launches its
+ * own persistent Chrome context (session dir per account) — independent of
+ * blogGenAgent.ts's browser, so the two can run at the same time via
+ * Promise.all instead of fighting over one shared browser/page.
  */
-export async function generateBlogCoverImage(params: {
+async function runCoverImageGeneration(params: {
   marketName: string;
   reportUrl: string;
   promptChoice?: '1' | '2';
   accountHandle?: string;
-}): Promise<string> {
+  outputDir?: string;
+}): Promise<{ localPath: string; imageText: string }> {
   const accountName = params.accountHandle || DEFAULT_IMAGE_ACCOUNT;
   const promptChoice = params.promptChoice || '1';
   const prompt = buildImagePrompt(params.marketName, params.reportUrl, promptChoice);
+  const outputDir = params.outputDir || TMP_DIR;
 
-  fs.mkdirSync(TMP_DIR, { recursive: true });
+  fs.mkdirSync(outputDir, { recursive: true });
 
   const sessionDir = sessionDirForAccount(accountName);
   fs.mkdirSync(sessionDir, { recursive: true });
@@ -655,7 +666,7 @@ export async function generateBlogCoverImage(params: {
       throw new Error(`ChatGPT (account "${accountName}"): not logged in and manual login was not completed in time.`);
     }
 
-    console.log(`   [image:${accountName}] Sending cover-image prompt for: "${params.marketName}" (up to ~9 min)...`);
+    console.log(`   [image:${accountName}] Sending cover-image prompt for: "${params.marketName}" (up to ~15 min)...`);
     await pasteIntoChatGptComposer(page, prompt);
     await page.waitForTimeout(1000);
 
@@ -702,15 +713,14 @@ export async function generateBlogCoverImage(params: {
 
     const imageBuffer = Buffer.from(base64Data, 'base64');
     const publicId = `${params.marketName.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 55)}-${Math.floor(Date.now() / 1000)}`;
-    const localPath = path.join(TMP_DIR, `${publicId}.png`);
+    const localPath = path.resolve(path.join(outputDir, `${publicId}.png`));
     fs.writeFileSync(localPath, imageBuffer);
     console.log(`   Saved locally: ${localPath}`);
 
-    const { url } = await uploadFileToGoogleDrive(localPath);
-    console.log(`   Uploaded to Google Drive: ${url}`);
+    const imageText = await lastAssistantText(page);
 
     recordChatGptSuccess();
-    return url;
+    return { localPath, imageText };
   } catch (err: any) {
     const { rotated, account } = recordChatGptFailure();
     if (rotated) err.message = `${err.message} (rotated out — next attempt uses "${account}")`;
@@ -718,4 +728,55 @@ export async function generateBlogCoverImage(params: {
   } finally {
     await context.close().catch(() => {});
   }
+}
+
+/**
+ * Generate a market-report cover image via ChatGPT (DALL-E 3), download it,
+ * and upload to Google Drive for a public URL.
+ */
+export async function generateBlogCoverImage(params: {
+  marketName: string;
+  reportUrl: string;
+  promptChoice?: '1' | '2';
+  accountHandle?: string;
+}): Promise<string> {
+  const { localPath } = await runCoverImageGeneration(params);
+  const { url } = await uploadFileToGoogleDrive(localPath);
+  console.log(`   Uploaded to Google Drive: ${url}`);
+  return url;
+}
+
+/**
+ * Same as generateBlogCoverImage, but also returns whatever text ChatGPT
+ * wrote alongside the image (research notes, a validation summary, etc.).
+ * Separate export so existing generateBlogCoverImage callers (which expect
+ * a plain string URL) are unaffected — only blogGenLoop.ts uses this, to
+ * log the text into New Logic!Z ("Image text") for a few days of observation.
+ */
+export async function generateBlogCoverImageWithText(params: {
+  marketName: string;
+  reportUrl: string;
+  promptChoice?: '1' | '2';
+  accountHandle?: string;
+}): Promise<{ url: string; imageText: string }> {
+  const { localPath, imageText } = await runCoverImageGeneration(params);
+  const { url } = await uploadFileToGoogleDrive(localPath);
+  console.log(`   Uploaded to Google Drive: ${url}`);
+  return { url, imageText };
+}
+
+/**
+ * Generate a market-report cover image via ChatGPT (DALL-E 3) and save it to
+ * local disk only — no Google Drive upload. Returns the absolute local path,
+ * for flows that write the file path (not a hosted URL) back to a sheet.
+ */
+export async function generateCoverImageLocalOnly(params: {
+  marketName: string;
+  reportUrl: string;
+  promptChoice?: '1' | '2';
+  accountHandle?: string;
+  outputDir?: string;
+}): Promise<string> {
+  const { localPath } = await runCoverImageGeneration(params);
+  return localPath;
 }
