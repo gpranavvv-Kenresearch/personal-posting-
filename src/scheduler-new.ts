@@ -50,7 +50,8 @@ import {
   runPearltreesBatch, runPdfhostBatch, runInstapaperBatch,
   runRaindropBatch, runTumblrBatch, runTelegraphBatch,
   runMediumBatch, runVelogBatch, runGoogleSiteBatch,
-  runFourSharedBatch, runReportDiscoveryBatch,
+  runFourSharedBatch, runReportDiscoveryBatch, runMataroaBatch,
+  runNoteBatch, runVcruBatch,
 } from './coordinator/masterCoordinator.js';
 import { runNightlyRssFeed } from './coordinator/rssFeeder.js';
 
@@ -92,6 +93,8 @@ export const DAILY_SLOTS: DailySlot[] = [
   { time: '10:35', label: 'Pearltrees 1/3',        run: () => runPearltreesBatch(1) },
   { time: '10:40', label: 'Velog 1/2',             run: () => runVelogBatch(1) },
   { time: '10:45', label: 'Linkmate 1/2',          run: () => runLinkmateBatch(1) },
+  { time: '10:50', label: 'Note 1/2',              run: () => runNoteBatch(1) },
+  // { time: '10:55', label: 'Vcru 1/1',              run: () => runVcruBatch(1) }, // TODO: enable once real vc.ru login/post selectors are in and login_vcru/post_vcru have been manually verified
   { time: '11:00', label: 'Calisthenics 1/2',      run: () => runCalisthenicsNBatch(1) },
   { time: '11:05', label: 'PdfHost 1/3',           run: () => runPdfhostBatch(1) },
   { time: '11:10', label: 'Google Sites 1/3',      run: () => runGoogleSiteBatch(1) },
@@ -100,6 +103,7 @@ export const DAILY_SLOTS: DailySlot[] = [
   { time: '11:30', label: 'LI Batch 1',            run: () => runLiBatch(undefined, 1) },
   { time: '11:35', label: 'Instapaper 1/3',        run: () => runInstapaperBatch(1) },
   { time: '11:45', label: 'Blogger 1/2',           run: () => runBloggerBatch(1) },
+  { time: '11:50', label: 'Mataroa 1/2',           run: () => runMataroaBatch(1) },
   { time: '12:00', label: 'FB Batch 2',            run: () => runFbBatch(2) },
   { time: '12:05', label: 'Raindrop 1/3',          run: () => runRaindropBatch(1) },
   { time: '12:10', label: '4shared 1/2',           run: () => runFourSharedBatch(1) },
@@ -122,6 +126,7 @@ export const DAILY_SLOTS: DailySlot[] = [
   { time: '14:30', label: 'Calisthenics 2/2',      run: () => runCalisthenicsNBatch(2) },
   { time: '14:35', label: 'Raindrop 2/3',          run: () => runRaindropBatch(2) },
   { time: '14:45', label: 'X Batch 2',             run: () => runXBatch(2) },
+  { time: '14:50', label: 'Mataroa 2/2',           run: () => runMataroaBatch(2) },
   { time: '15:00', label: 'HackMD 2/2',            run: () => runHackmdBatch(2) },
   { time: '15:05', label: 'Tumblr 2/2',            run: () => runTumblrBatch(2) },
   { time: '15:15', label: 'Group4',                run: runGroup('Group4') },
@@ -140,8 +145,10 @@ export const DAILY_SLOTS: DailySlot[] = [
   { time: '17:00', label: 'FB Batch 5',            run: () => runFbBatch(5) },
   { time: '17:05', label: 'Raindrop 3/3',          run: () => runRaindropBatch(3) },
   { time: '17:15', label: 'WordPress 2/2',         run: () => runWordpressBatch(2) },
+  { time: '17:20', label: 'X Batch 3',             run: () => runXBatch(3) },
   { time: '17:30', label: 'Calisthenics 3/3',      run: () => runCalisthenicsNBatch(3) },
   { time: '17:45', label: 'Linkmate 3/3',          run: () => runLinkmateBatch(3) },
+  { time: '17:50', label: 'Note 2/2',              run: () => runNoteBatch(2) },
   { time: '18:20', label: 'Daily Posting Summary', run: runDailyPostingSummary },
 ];
 
@@ -218,6 +225,7 @@ export async function startCoordinatorDaemon(): Promise<void> {
   console.log('  17:00 │ FB-5');
   console.log('  17:05 │ Raindrop        (3/3)');
   console.log('  17:15 │ WordPress       (2/2, slot 3)');
+  console.log('  17:20 │ X-3');
   console.log('  17:30 │ Calisthenics    (3/3, slot 2)');
   console.log('  17:45 │ Linkmate        (3/3, slot 1)');
   console.log('  18:20 │ Daily Posting Summary (report + Algo Reports!F write)');

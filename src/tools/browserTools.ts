@@ -12,7 +12,8 @@ import { loginToFacebook } from '../browser/facebook/login.js';
 import { postToFacebook } from '../browser/facebook/poster.js';
 import { loginToLinkedIn } from '../browser/linkedin/login.js';
 import { postToLinkedIn } from '../browser/linkedin/poster.js';
-import { postToLinkedInWithImage } from '../browser/linkedin/imagePoster.js';
+import { postToLinkedInWithImage, postToLinkedInWithDocument } from '../browser/linkedin/imagePoster.js';
+import path from 'node:path';
 import { postToCalisthenics } from '../browser/calisthenics/poster.js';
 import { postToSubstack } from '../browser/substack/poster.js';
 import { loginToSubstack, closeSubstackBrowser, getSubstackAccountByNickname, getActiveSubstackAccount } from '../browser/substack/login.js';
@@ -54,6 +55,8 @@ import { loginToNotion, closeNotionBrowser, getNotionAccountByNickname, getActiv
 import { postToNotion } from '../browser/notion/poster.js';
 import { loginToNote, closeNoteBrowser, getNoteAccountByNickname, getActiveNoteAccount } from '../browser/note/login.js';
 import { postToNote } from '../browser/note/poster.js';
+import { loginToVcru, closeVcruBrowser, getVcruAccountByNickname, getActiveVcruAccount } from '../browser/vcru/login.js';
+import { postToVcru } from '../browser/vcru/poster.js';
 import { loginToParagraph, closeParagraphBrowser } from '../browser/paragraph/login.js';
 import { postToParagraph } from '../browser/paragraph/poster.js';
 import { getAccountByHandle } from '../config/accounts.js';
@@ -94,6 +97,7 @@ let pearltreesPage: Page | null = null;
 let mastodonPage: Page | null = null;
 let notionPage: Page | null = null;
 let notePage: Page | null = null;
+let vcruPage: Page | null = null;
 let paragraphPage: Page | null = null;
 
 export const BROWSER_TOOLS: Tool[] = [
@@ -116,6 +120,7 @@ export const BROWSER_TOOLS: Tool[] = [
       properties: {
         tweetText: { type: 'string', description: 'Tweet text (≤280 chars)' },
         handle: { type: 'string', description: 'X account handle' },
+        imagePath: { type: 'string', description: 'Optional local file path to an image to attach to the tweet' },
       },
       required: ['tweetText', 'handle'],
     },
@@ -602,6 +607,29 @@ export const BROWSER_TOOLS: Tool[] = [
     },
   },
   {
+    name: 'login_vcru',
+    description: 'Login to vc.ru with account credentials',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        nickname: { type: 'string', description: 'vc.ru account nickname' },
+      },
+      required: ['nickname'],
+    },
+  },
+  {
+    name: 'post_vcru',
+    description: 'Post an article to vc.ru. Must call login_vcru first.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        title: { type: 'string', description: 'Article title' },
+        htmlContent: { type: 'string', description: 'Article content (HTML)' },
+      },
+      required: ['title', 'htmlContent'],
+    },
+  },
+  {
     name: 'login_paragraph',
     description: 'Login to Paragraph.com with account credentials',
     input_schema: {
@@ -635,7 +663,7 @@ export async function executeBrowserTool(toolName: string, input: Record<string,
       return await loginXTool(input.accountHandle);
     }
     if (toolName === 'post_tweet') {
-      return await postTweetTool(input.tweetText, input.handle);
+      return await postTweetTool(input.tweetText, input.handle, input.imagePath);
     }
     if (toolName === 'post_thread') {
       return await postThreadTool(input.tweets, input.handle);
@@ -653,7 +681,7 @@ export async function executeBrowserTool(toolName: string, input: Record<string,
       return await postLiTool(input.nickname, input.postText);
     }
     if (toolName === 'post_linkedin_image') {
-      return await postLiImageTool(input.nickname, input.postText, input.imagePath);
+      return await postLiImageTool(input.nickname, input.postText, input.imagePath, input.docTitle);
     }
     if (toolName === 'login_hackmd') {
       return await loginHackmdTool(input.nickname);
@@ -788,6 +816,12 @@ export async function executeBrowserTool(toolName: string, input: Record<string,
     if (toolName === 'post_note') {
       return await postNoteTool(input.title, input.htmlContent);
     }
+    if (toolName === 'login_vcru') {
+      return await loginVcruTool(input.nickname);
+    }
+    if (toolName === 'post_vcru') {
+      return await postVcruTool(input.title, input.htmlContent);
+    }
     if (toolName === 'login_paragraph') {
       return await loginParagraphTool(input.nickname);
     }
@@ -818,13 +852,13 @@ async function loginXTool(accountHandle: string): Promise<any> {
   }
 }
 
-async function postTweetTool(tweetText: string, handle: string): Promise<any> {
+async function postTweetTool(tweetText: string, handle: string, imagePath?: string): Promise<any> {
   try {
     if (!xPage) {
       return { error: 'Not logged in. Call login_x first.', success: false };
     }
 
-    const result = await postTweet(xPage, tweetText, handle);
+    const result = await postTweet(xPage, tweetText, handle, imagePath);
     return { success: true, tweetUrl: result.tweetUrl, tweetText };
   } catch (err: any) {
     return { error: err.message, success: false };
@@ -926,14 +960,22 @@ async function postLiTool(nickname: string, postText: string): Promise<any> {
   }
 }
 
-async function postLiImageTool(nickname: string, postText: string, imagePath: string): Promise<any> {
+const LI_DOCUMENT_EXTENSIONS = new Set(['.pdf', '.doc', '.docx', '.ppt', '.pptx', '.odt', '.ods', '.ppsx']);
+
+async function postLiImageTool(nickname: string, postText: string, imagePath: string, docTitle?: string): Promise<any> {
   const myPage = liPages.get(nickname);
   try {
     if (!myPage) {
       return { error: 'Not logged in. Call login_linkedin first.', success: false };
     }
 
-    const result = await postToLinkedInWithImage(myPage, postText, imagePath);
+    // LinkedIn's "Photo" upload widget rejects PDFs outright ("File(s) not
+    // supported", confirmed live 2026-09-22) — a document extension must go
+    // through the separate "Add a document" flow instead.
+    const isDocument = LI_DOCUMENT_EXTENSIONS.has(path.extname(imagePath).toLowerCase());
+    const result = isDocument
+      ? await postToLinkedInWithDocument(myPage, postText, imagePath, docTitle || 'Full report')
+      : await postToLinkedInWithImage(myPage, postText, imagePath);
     return { success: true, postUrl: result.postUrl, postText: result.postText };
   } catch (err: any) {
     return { error: err.message, success: false };
@@ -1396,6 +1438,12 @@ export async function closeAllBrowsers(): Promise<void> {
     } catch (e) {}
     notePage = null;
   }
+  if (vcruPage) {
+    try {
+      await closeVcruBrowser();
+    } catch (e) {}
+    vcruPage = null;
+  }
 }
 
 /**
@@ -1516,7 +1564,16 @@ let notionNickname: string | null = null;
 
 async function loginNotionTool(nickname: string): Promise<any> {
   try {
-    notionPage = await loginToNotion({ nickname, headless: true });
+    // Respects HEADLESS=false the same way velog/login.ts does — was
+    // hardcoded true before, so there was no way to watch a live batch run.
+    // minimized:true always, regardless of headless — a HEADLESS=false
+    // debug run should still start minimized in the taskbar, not pop up
+    // and steal focus (poster.ts no longer needs to un-minimize it either).
+    notionPage = await loginToNotion({
+      nickname,
+      headless: process.env.HEADLESS !== 'false',
+      minimized: true,
+    });
     notionNickname = nickname;
     return { success: true, message: `Logged in to Notion (${nickname})` };
   } catch (err: any) {
@@ -1812,6 +1869,39 @@ async function postNoteTool(title: string, htmlContent: string): Promise<any> {
       await closeNoteBrowser().catch(() => {});
       notePage = null;
       noteNickname = null;
+    }
+  }
+}
+
+/**
+ * vc.ru Tools
+ */
+let vcruNickname: string | null = null;
+
+async function loginVcruTool(nickname: string): Promise<any> {
+  try {
+    vcruPage = await loginToVcru({ nickname });
+    vcruNickname = nickname;
+    return { success: true, message: `Logged in to vc.ru (${nickname})` };
+  } catch (err: any) {
+    vcruPage = null;
+    vcruNickname = null;
+    return { error: err.message, success: false };
+  }
+}
+
+async function postVcruTool(title: string, htmlContent: string): Promise<any> {
+  try {
+    if (!vcruPage) return { error: 'Not logged in. Call login_vcru first.', success: false };
+    const result = await postToVcru(vcruPage, title, htmlContent);
+    return { success: result.success, postUrl: result.postUrl };
+  } catch (err: any) {
+    return { error: err.message, success: false };
+  } finally {
+    if (vcruPage) {
+      await closeVcruBrowser().catch(() => {});
+      vcruPage = null;
+      vcruNickname = null;
     }
   }
 }

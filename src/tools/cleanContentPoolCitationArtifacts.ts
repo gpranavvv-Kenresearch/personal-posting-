@@ -13,7 +13,14 @@ import fs from 'fs';
 
 const SPREADSHEET_ID = '1p_N3zzJbUx-7t8sjuAtbQsHaUfVmYxytQU_gDd2MGwQ';
 const SHEET_NAME = 'Content Pool';
-const ARTIFACT_RE = /\s*:contentReference\[[^\]]*\]\{[^}]*\}/g;
+// Matches the SHAPE of ChatGPT's internal tool/citation markup
+// (":word-word[optional-bracket]{attrs}"), not one fixed name — ChatGPT has
+// already renamed this once (old: ":contentReference[oaicite:0]{index=0}",
+// confirmed-live-2026-09-28 rename: ":chatgpt-content-reference{index=\"9\"}"),
+// and matching exact names is whack-a-mole. Same generic pattern as
+// blogGenAgent.ts's sanitizeHtml(), kept in sync so this one-off cleanup
+// catches whatever shape actually made it into the sheet, past or future.
+const ARTIFACT_RE = /\s*:[\w-]+(?:\[[^\]]*\])?\{[^}]*\}/g;
 
 async function getSheetsClient() {
   let credentials: object;

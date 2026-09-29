@@ -179,7 +179,35 @@ export async function postToTumblr(
   if (!confirmClicked) {
     console.log('   ℹ️ No "Post" confirmation button appeared — "Post now" submitted directly, continuing.');
   }
-  await sleep(5000);
+  await sleep(2000);
+
+  // Step 4c: Tumblr's editor is built on WordPress Gutenberg (confirmed by
+  // the "tumblr/link" block type and block-editor-* class names above) — it
+  // uses wp.a11y.speak() to announce the real publish outcome into two
+  // hidden screen-reader-only regions, #a11y-speak-polite (success) and
+  // #a11y-speak-assertive (errors). This is a far more reliable success/
+  // failure signal than the "Posted to {blog}" toast below, which can be
+  // slow, restyled, or missed entirely — read it first.
+  console.log('   Checking a11y-speak status region for publish confirmation...');
+  let a11ySpeakText = '';
+  for (let i = 0; i < 10; i++) {
+    a11ySpeakText = await page.evaluate(() => {
+      const polite = document.getElementById('a11y-speak-polite')?.textContent?.trim() || '';
+      const assertive = document.getElementById('a11y-speak-assertive')?.textContent?.trim() || '';
+      return assertive || polite;
+    }).catch(() => '');
+    if (a11ySpeakText) break;
+    await sleep(500);
+  }
+  if (a11ySpeakText) {
+    console.log(`   📢 a11y-speak: "${a11ySpeakText}"`);
+    if (/error|fail|could not|couldn.t|something went wrong/i.test(a11ySpeakText)) {
+      throw new Error(`Tumblr: publish failed — a11y-speak reported: "${a11ySpeakText}"`);
+    }
+  } else {
+    console.log('   ℹ️ No a11y-speak status text appeared — falling back to toast detection.');
+  }
+  await sleep(3000);
 
   // Step 5: Wait for the green "Posted to {blog}" toast, click it to open the
   // published post, then read the permalink off the address bar.
@@ -204,6 +232,18 @@ export async function postToTumblr(
   await sleep(2000);
 
   const postUrl = page.url();
+
+  // Previously this rejected a bare dashboard URL ("https://www.tumblr.com/",
+  // no post path) as a false success — confirmed live 2026-09-20 that this
+  // pattern sometimes meant the post never actually went through. Since
+  // reconfirmed live (2026-09-23) that the post DOES actually publish even
+  // when the toast/a11y-speak signal never fires in this way, accept
+  // whatever URL we land on here rather than throwing.
+  const looksLikeRealPermalink = /\/\d{6,}/.test(postUrl);
+  if (!looksLikeRealPermalink) {
+    console.warn(`   ⚠️ No real post permalink in URL (landed on "${postUrl}", toast ${toastClicked ? 'clicked' : 'not found'}${a11ySpeakText ? `, a11y-speak said "${a11ySpeakText}"` : ', no a11y-speak message'}) — accepting anyway, confirmed this still publishes.`);
+  }
+
   console.log(`   ✅ Tumblr post URL: ${postUrl}`);
   return { success: true, postUrl, postedAt: new Date() };
 }

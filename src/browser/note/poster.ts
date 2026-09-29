@@ -76,7 +76,12 @@ export async function postToNote(
   // Copy link for URL — never use address bar
   console.log('   Copying post URL...');
   await sleep(3000);
-  const copyLinkBtn = page.locator('button[aria-label="Copy link"], button[aria-label="リンクをコピー"]').first();
+  // The aria-label ("Copy link" / "リンクをコピー") sits on the inner <svg>
+  // icon, not the <button> itself — match on the button that contains that
+  // svg (plus a direct button[aria-label] fallback in case that changes).
+  const copyLinkBtn = page.locator(
+    'button:has(svg[aria-label="Copy link"]), button:has(svg[aria-label="リンクをコピー"]), button[aria-label="Copy link"], button[aria-label="リンクをコピー"]'
+  ).first();
   await copyLinkBtn.click({ delay: 150 }).catch(() => {});
   await sleep(2000);
   let postUrl = await page.evaluate(() => navigator.clipboard.readText()).catch(() => '');

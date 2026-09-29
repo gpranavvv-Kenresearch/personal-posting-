@@ -17,6 +17,41 @@ export interface NotionAccount {
   active: boolean;
 }
 
+// Notion's own site occasionally either times out on goto() or lands on a
+// blank/unrendered tab (seen live 2026-09-22 — a bad goto or a page that
+// never painted was silently treated as "loaded", then every later step
+// failed against an empty page). This wraps navigation with up to 3
+// attempts: a failed goto is retried; a goto that succeeds but renders
+// nothing gets a hard refresh (CDP reload with cache bypassed, not just a
+// soft page.reload()) before the next attempt.
+export async function gotoWithHardRefreshRetry(page: Page, url: string, maxAttempts = 3): Promise<void> {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    } catch (err: any) {
+      console.warn(`   ⚠️ Notion goto attempt ${attempt}/${maxAttempts} failed: ${err.message?.split('\n')[0]}`);
+      if (attempt === maxAttempts) throw err;
+      continue;
+    }
+    await sleep(1500);
+
+    const rendered = await page.evaluate(() => (document.body?.innerText ?? '').trim().length > 0).catch(() => false);
+    if (rendered) return;
+
+    console.warn(`   ⚠️ Notion page looks blank/unloaded (attempt ${attempt}/${maxAttempts})${attempt < maxAttempts ? ' — hard refreshing...' : ''}`);
+    if (attempt < maxAttempts) {
+      try {
+        const cdp = await page.context().newCDPSession(page);
+        await cdp.send('Page.reload', { ignoreCache: true });
+        await cdp.detach().catch(() => {});
+      } catch {
+        await page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+      }
+      await sleep(2000);
+    }
+  }
+}
+
 export function getNotionAccounts(): NotionAccount[] {
   if (!fs.existsSync(NOTION_ACCOUNTS_FILE)) return [];
   return JSON.parse(fs.readFileSync(NOTION_ACCOUNTS_FILE, 'utf8'));
@@ -68,7 +103,7 @@ async function isLoggedIn(page: Page): Promise<boolean> {
   }
 }
 
-export async function loginToNotion(options?: { nickname?: string; headless?: boolean }): Promise<Page> {
+export async function loginToNotion(options?: { nickname?: string; headless?: boolean; minimized?: boolean }): Promise<Page> {
   const account = options?.nickname
     ? getNotionAccountByNickname(options.nickname) ?? getActiveNotionAccount()
     : getActiveNotionAccount();
@@ -85,6 +120,15 @@ export async function loginToNotion(options?: { nickname?: string; headless?: bo
   console.log(`   Using Notion session: ${sessionDir}`);
 
   const headless = options?.headless ?? true;
+  // Independent of headless — headless:false gets you a REAL window
+  // (needed for reliable clipboard paste etc. during batch posting), but
+  // that window should still start minimized to the taskbar rather than
+  // popping up front-and-center. Defaults to `headless` for backward
+  // compat with the interactive/manual-login callers below (login.ts's own
+  // main() and index.ts's save-notion-session), which explicitly need a
+  // VISIBLE window for the user to complete OTP/login by hand and must
+  // never be minimized.
+  const minimized = options?.minimized ?? headless;
   browserContext = await chromium.launchPersistentContext(sessionDir, {
     headless,
     executablePath: fs.existsSync(chromePath) ? chromePath : undefined,
@@ -93,7 +137,7 @@ export async function loginToNotion(options?: { nickname?: string; headless?: bo
     slowMo: 50,
     ignoreDefaultArgs: ['--enable-automation'],
     args: [
-      ...(headless ? ['--start-minimized'] : []),
+      ...(minimized ? ['--start-minimized'] : []),
       '--disable-blink-features=AutomationControlled',
       '--disable-renderer-backgrounding',
       '--disable-background-timer-throttling',
@@ -110,7 +154,9 @@ export async function loginToNotion(options?: { nickname?: string; headless?: bo
     (window as any).chrome = (window as any).chrome || { runtime: {} };
   });
 
-  if (headless) {
+  // poster.ts's setViewportSize() gives the page a full-size render surface
+  // for reliable interaction without ever having to un-minimize the window.
+  if (minimized) {
     try {
       const tmpPage = browserContext.pages()[0] || await browserContext.newPage();
       const cdp = await browserContext.newCDPSession(tmpPage);
@@ -131,7 +177,7 @@ export async function loginToNotion(options?: { nickname?: string; headless?: bo
 
   // Check saved session
   console.log('   Checking Notion session...');
-  await page.goto('https://www.notion.so/', { waitUntil: 'domcontentloaded', timeout: 30000 });
+  await gotoWithHardRefreshRetry(page, 'https://www.notion.so/');
   await sleep(4000);
 
   if (await isLoggedIn(page)) {
@@ -141,7 +187,7 @@ export async function loginToNotion(options?: { nickname?: string; headless?: bo
 
   // Login flow
   console.log('   Not logged in — starting Notion login...');
-  await page.goto('https://www.notion.so/login', { waitUntil: 'domcontentloaded', timeout: 30000 });
+  await gotoWithHardRefreshRetry(page, 'https://www.notion.so/login');
   await sleep(2000);
 
   // Enter email

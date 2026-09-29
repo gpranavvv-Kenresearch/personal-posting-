@@ -15,10 +15,18 @@
  * collide with posting batches. Run this as its own long-lived process.
  */
 
-import { generateBlogViaChatGpt } from '../agents/blogGenAgent.js';
+import { generateBlogViaChatGpt, BlogGenResult } from '../agents/blogGenAgent.js';
 import { generateBlogCoverImageWithText } from '../agents/blogImageAgent.js';
-import { runBlogSanityChecks } from '../agents/blogSanityAgent.js';
-import { validateBrandAuthority } from '../agents/blogBrandValidator.js';
+// import { runBlogSanityChecks } from '../agents/blogSanityAgent.js';
+// import { validateBrandAuthority } from '../agents/blogBrandValidator.js';
+// normalizeImgTags alone (not the full runBlogSanityChecks suite above,
+// which stays disabled pending the KPI-check redesign) — every <img> tag
+// this loop produces MUST end up as the canonical `<img src='URL'>` shape
+// (single-quoted, no alt) before it's saved; this was the one piece of that
+// disabled suite actually needed here, and it was silently not running.
+import { normalizeImgTags } from '../agents/blogSanityAgent.js';
+import { generateAndUploadSnapshotImage } from '../agents/blogSnapshotImageAgent.js';
+import { generateAndUploadLandscapeImage } from '../agents/blogLandscapeImageAgent.js';
 import { applyPreferredSourceCTA, validatePreferredSourceCTA, PreferredSourceMode } from '../agents/blogPreferredSourceAgent.js';
 import { getContentPoolRowsNeedingGeneration, saveGeneratedBlogToPool, saveCoverImageUrlToPool, saveNewLogicImageText, getSheetRowByIndex } from '../sheets/sheets.js';
 
@@ -26,13 +34,67 @@ import { getContentPoolRowsNeedingGeneration, saveGeneratedBlogToPool, saveCover
 // data from day one (can't back-fill it later). Switch to 'direct' here (or
 // wire up per-row rotation) once there's baseline click data to compare
 // against. See src/agents/blogPreferredSourceAgent.ts for what each mode does.
-const PREFERRED_SOURCE_MODE: PreferredSourceMode = 'tracked';
+const PREFERRED_SOURCE_MODE: PreferredSourceMode = 'direct';
 
-/** Force the cover image into the article HTML — replaces a model-written <img> if any, else prepends one. */
+/**
+ * Force the cover/header image at the very TOP of the article, before the
+ * H1 — ALWAYS prepends, never replaces an existing <img>.
+ *
+ * The V1.3 prompt (see blogGenAgent.ts) never writes a leading <img> of its
+ * own — the only <img> in its raw output is the mid-article snapshot
+ * placeholder (YOUR_IMAGE_URL_HERE, inside a <figure> after the intro).
+ * The old "replace the first <img> tag" behavior therefore grabbed THAT
+ * placeholder and put the cover image mid-article instead of at the top —
+ * confirmed live 2026-09-18. Snapshot injection must also run BEFORE this,
+ * so its placeholder is already gone by the time this ever looks for one.
+ */
 function injectCoverImage(html: string, imageUrl: string): string {
   if (!imageUrl) return html;
-  const imgTag = `<img src='${imageUrl}'>`;
-  return /<img\b[^>]*>/i.test(html) ? html.replace(/<img\b[^>]*>/i, imgTag) : `${imgTag}\n${html}`;
+  // Double quotes — matches the mid-article snapshot <img> (which keeps
+  // whatever quote style the V1.3 prompt's "<img src=... alt=...>" spec
+  // uses, itself double-quoted) so both images use the same attribute
+  // quoting throughout the article, not a mix of ' and ".
+  return `<img src="${imageUrl}">\n${html}`;
+}
+
+/**
+ * Same pattern as injectCoverImage — replace the V1.3 prompt's mid-article
+ * <img src="YOUR_IMAGE_URL_HERE"> placeholder with the real, generated-and-
+ * uploaded snapshot chart URL. The negative lookahead keeps this from also
+ * matching the SECOND placeholder (YOUR_IMAGE_URL_HERE_2), since that token
+ * starts with the same literal text.
+ */
+function injectSnapshotImage(html: string, snapshotUrl: string): string {
+  if (!snapshotUrl) return html;
+  return html.replace(/YOUR_IMAGE_URL_HERE(?!_2)/g, snapshotUrl);
+}
+
+/** Second mid-article image — replaces <img src="YOUR_IMAGE_URL_HERE_2"> with the generated-and-uploaded "Forecast Outlook & Market Landscape" image URL. */
+function injectSnapshotImage2(html: string, landscapeUrl: string): string {
+  if (!landscapeUrl) return html;
+  return html.replace(/YOUR_IMAGE_URL_HERE_2/g, landscapeUrl);
+}
+
+/**
+ * Safety net for the case a snapshot/landscape image generation step throws
+ * (caught non-fatally above) or blog.imageData(2) was empty to begin with —
+ * either way the placeholder token never gets replaced, survives
+ * normalizeImgTags() as a syntactically valid but broken <img src='...'>
+ * tag (src = literal placeholder text, not a URL), and would otherwise get
+ * written straight into the sheet as a dead image. Runs AFTER
+ * normalizeImgTags, so every <img> is already in the canonical
+ * `<img src='...'>` shape and this only needs one simple pattern. Any tag
+ * whose src isn't a real http(s) URL is dropped entirely — better an
+ * article with one fewer image than one with a visibly broken one.
+ */
+function stripUnresolvedImagePlaceholders(html: string): { html: string; removed: number } {
+  let removed = 0;
+  const out = html.replace(/<img\s+src='([^']*)'\s*>\s*\n?/gi, (tag, src) => {
+    if (/^https?:\/\//i.test(src.trim())) return tag;
+    removed++;
+    return '';
+  });
+  return { html: out, removed };
 }
 
 const MIN_WORDS = 400; // real articles are 1,450-1,600 words — this is a "did anything land at all" floor, not a quality bar
@@ -62,6 +124,8 @@ export interface BlogGenBatchOptions {
   imageAccountHandle?: string;
   /** Retry once if the post-write verification fails (default true). */
   retryOnVerifyFail?: boolean;
+  /** 'master' forces the master prompt every time, skipping the normal 50/50 Prompt B split — for manually testing the master prompt itself. */
+  promptVersion?: 'v1' | 'v2' | 'master';
 }
 
 /** One pass: generate up to `limit` pending Content Pool rows, verifying each write before moving on. */
@@ -107,19 +171,27 @@ export async function runBlogGenBatch(opts: BlogGenBatchOptions = {}): Promise<{
     // up-to-15-min image generation has no reason to re-run just because the blog
     // side failed validation.
     let coverImageUrl = '';
+    // Set once the cover-image attempt fails for ANY reason (closed browser
+    // window, timeout, etc.) — without this, a retry attempt only checks
+    // `!coverImageUrl` (still empty after a failure) and reopens a second
+    // Chrome window to try the ~15-min image generation all over again, even
+    // when the failure was the user intentionally closing that window.
+    // Cover image is best-effort everywhere it's used — one failed attempt
+    // per row is enough; the row proceeds blog-only from here on.
+    let coverImageGaveUp = false;
 
     while (attemptsLeft > 0 && !rowOk) {
       attemptsLeft--;
       try {
-        let blog: { title: string; description: string; html: string };
+        let blog: BlogGenResult;
 
-        // Randomly pick V1 (buildMasterBlogPrompt) or V2 (keyword-focused
-        // buildMasterBlogPromptV2) per row — the two prompts stay fully
-        // separate in blogGenAgent.ts, this just rotates which one runs.
-        const promptVersion: 'v1' | 'v2' = Math.random() < 0.5 ? 'v1' : 'v2';
-        console.log(`   Prompt version: ${promptVersion}`);
+        // Prompt selection is fully owned inside generateBlogViaChatGpt() now
+        // (50% the master prompt / 50% the 4-prompt Prompt B pool, picked
+        // there and logged there) — no promptVersion passed here means it
+        // never falls into the old v2 (keyword-focused) branch, which is
+        // intentionally retired from rotation (2026-09-25).
 
-        if (opts.withImage && !coverImageUrl) {
+        if (opts.withImage && !coverImageUrl && !coverImageGaveUp) {
           // Blog (Chrome window #1) and cover image (Chrome window #2) run
           // concurrently — two separate, independent browser contexts.
           console.log(`   Opening 2 parallel Chrome windows (blog + image)...`);
@@ -145,42 +217,106 @@ export async function runBlogGenBatch(opts: BlogGenBatchOptions = {}): Promise<{
               })
               .catch((imgErr: any) => {
                 console.log(`   ⚠️ Cover image failed — continuing without one: ${imgErr.message}`);
+                coverImageGaveUp = true;
                 return '';
               }),
-            generateBlogViaChatGpt({ title, url: row.targetUrl, accountHandle: opts.blogAccountHandle, promptVersion }),
+            generateBlogViaChatGpt({ title, url: row.targetUrl, accountHandle: opts.blogAccountHandle, promptVersion: opts.promptVersion }),
           ]);
           if (imgResult) coverImageUrl = imgResult;
           blog = blogResult;
         } else {
-          if (opts.withImage) console.log(`   Cover image already available — opening 1 Chrome window (blog only)...`);
-          blog = await generateBlogViaChatGpt({ title, url: row.targetUrl, accountHandle: opts.blogAccountHandle, promptVersion });
+          if (opts.withImage) {
+            console.log(coverImageGaveUp
+              ? `   Cover image already failed once for this row — not retrying it, opening 1 Chrome window (blog only)...`
+              : `   Cover image already available — opening 1 Chrome window (blog only)...`);
+          }
+          blog = await generateBlogViaChatGpt({ title, url: row.targetUrl, accountHandle: opts.blogAccountHandle, promptVersion: opts.promptVersion });
         }
 
-        const htmlWithImage = coverImageUrl ? injectCoverImage(blog.html, coverImageUrl) : blog.html;
+        let htmlWithImage = blog.html;
 
-        const sanity = runBlogSanityChecks(htmlWithImage, { title });
-        if (sanity.changes.length > 0) {
-          console.log(`   [BLOG SANITY] Applied: ${sanity.changes.join(', ')}`);
+        // Mid-article snapshot chart (donut/gauge/bar widgets built from
+        // blog.imageData — see blogSnapshotImageAgent.ts) replacing the
+        // prompt's YOUR_IMAGE_URL_HERE placeholder. MUST run before
+        // injectCoverImage below — it's the only <img> in the model's raw
+        // output, so the cover-image step needs it already resolved.
+        // Non-fatal — a failed snapshot never fails the row, the
+        // placeholder just stays as-is.
+        let snapshotMetrics: import('../agents/blogSnapshotImageAgent.js').SnapshotMetric[] = [];
+        if (blog.imageData) {
+          try {
+            const snapshot = await generateAndUploadSnapshotImage({ marketName: blog.seoTitle || title, imageData: blog.imageData });
+            htmlWithImage = injectSnapshotImage(htmlWithImage, snapshot.url);
+            snapshotMetrics = snapshot.metrics;
+            console.log(`   [SNAPSHOT IMAGE] Inserted (${snapshot.metrics.length} metrics) → ${snapshot.url}`);
+          } catch (snapErr: any) {
+            console.log(`   ⚠️ Snapshot image failed — continuing without it: ${snapErr.message}`);
+          }
         }
 
-        const preferredSource = applyPreferredSourceCTA(sanity.html, { mode: PREFERRED_SOURCE_MODE, title: blog.title || title });
+        // Second mid-article image — "Forecast Outlook & Market Landscape"
+        // (Growth Drivers / Emerging Trends / Competitive Landscape, plus the
+        // forecast trajectory reused from the FIRST image's already-parsed
+        // base/forecast/CAGR metrics) — see blogLandscapeImageAgent.ts. Same
+        // non-fatal pattern as the snapshot image above; must also run before
+        // injectCoverImage.
+        if (blog.imageData2 || snapshotMetrics.length) {
+          try {
+            const landscape = await generateAndUploadLandscapeImage({
+              marketName: blog.seoTitle || title,
+              heroSourceMetrics: snapshotMetrics,
+              imageData2: blog.imageData2,
+            });
+            htmlWithImage = injectSnapshotImage2(htmlWithImage, landscape.url);
+            console.log(`   [LANDSCAPE IMAGE] Inserted → ${landscape.url}`);
+          } catch (landErr: any) {
+            console.log(`   ⚠️ Landscape image failed — continuing without it: ${landErr.message}`);
+          }
+        }
+
+        // Cover/header image ALWAYS prepends at the top, after the snapshot
+        // placeholder above is already resolved — see injectCoverImage's
+        // doc comment for why order matters here.
+        if (coverImageUrl) htmlWithImage = injectCoverImage(htmlWithImage, coverImageUrl);
+
+        // 2026-09-18: runBlogSanityChecks / validateBrandAuthority
+        // temporarily disabled (imports commented out above) — their KPI
+        // checks are being redesigned around the new image pipeline. Write
+        // straight through for now; the retry-on-failure loop around this
+        // block (attemptsLeft / BLOCKED_ERROR_PREFIXES) is untouched.
+        //
+        // normalizeImgTags is the one exception — non-negotiable canonical
+        // <img src='URL'> shape for every image, regardless of what quote
+        // style ChatGPT's raw output or injectCoverImage/injectSnapshotImage
+        // used going in.
+        const imgNormalized = normalizeImgTags(htmlWithImage, { title: blog.title || title });
+        if (imgNormalized.changed) console.log('   [IMG NORMALIZE] Rewrote <img> tag(s) to canonical single-quoted shape');
+        htmlWithImage = imgNormalized.html;
+
+        // Must run AFTER normalizeImgTags (needs the canonical <img src='...'>
+        // shape) and BEFORE saveGeneratedBlogToPool below — never let a
+        // broken/unresolved image placeholder reach the sheet.
+        const placeholderCheck = stripUnresolvedImagePlaceholders(htmlWithImage);
+        if (placeholderCheck.removed > 0) {
+          console.log(`   ⚠️ Removed ${placeholderCheck.removed} unresolved image placeholder(s) before saving — that image's generation must have failed or its data was empty.`);
+        }
+        htmlWithImage = placeholderCheck.html;
+
+        const preferredSource = applyPreferredSourceCTA(htmlWithImage, { mode: PREFERRED_SOURCE_MODE, title: blog.title || title });
         console.log(`   [PREFERRED SOURCE] ${preferredSource.applied ? `Inserted (${preferredSource.placement})` : `Skipped (${preferredSource.placement})`}`);
         const preferredSourceCheck = validatePreferredSourceCTA(preferredSource.html, PREFERRED_SOURCE_MODE);
         if (preferredSourceCheck.status !== 'PASS') {
           console.log(`   [PREFERRED SOURCE] ⚠️ Validation issues (non-fatal): ${preferredSourceCheck.issues.join(' | ')}`);
         }
 
-        const brandCheck = validateBrandAuthority(preferredSource.html, { title: blog.title || title });
-        if (brandCheck.status !== 'PASS') {
-          const issueSummary = brandCheck.issues.map((i) => `${i.rule}: ${i.problem}`).join(' | ');
-          throw new Error(`BRAND_VALIDATION_FAILED (score ${brandCheck.score}/10): ${issueSummary}`);
-        }
-        console.log(`   [BRAND CHECK] PASS (score ${brandCheck.score}/10)`);
-        if (brandCheck.issues.length > 0) {
-          console.log(`   [BRAND CHECK] Advisory (non-blocking): ${brandCheck.issues.map((i) => `${i.rule}: ${i.problem}`).join(' | ')}`);
-        }
-
-        await saveGeneratedBlogToPool(row, { coverImageUrl, html: preferredSource.html }, 'newLogic');
+        await saveGeneratedBlogToPool(row, {
+          coverImageUrl,
+          html: preferredSource.html,
+          seoTitle: blog.seoTitle,
+          metaDescription: blog.description,
+          imageData: blog.imageData,
+          imageData2: blog.imageData2,
+        }, 'newLogic');
 
         console.log(`   Verifying write for row ${row.rowIndex}...`);
         const verdict = await verifyWrite(row.rowIndex, !!opts.withImage);

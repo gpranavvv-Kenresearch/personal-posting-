@@ -1634,7 +1634,15 @@ function stripEmDashes(text: string): string {
 // (confirmed live 2026-08-31 — this exact case slipped through even after
 // the \d fix, on the very next real generation).
 function ensureNumberedListSpacing(text: string): string {
-  const withBreaks = text.replace(/(?<!\p{Nd})([1-9])\.(\s+)(?=[\p{Lu}\p{Nd}])/gu, '\n\n$1.$2');
+  // The marker digit itself must also be \p{Nd}, not plain ASCII [1-9] — the
+  // model sometimes bolds the point marker too ("**2**." -> convertMarkdownBoldToUnicode
+  // runs first and turns it into "𝟐."), which a plain [1-9] never matches, so
+  // the whole rule silently no-ops for that point (confirmed live 2026-09-25:
+  // every numbered point in a real post had its marker bolded, so NONE of
+  // them got a break inserted — the exact wall-of-text failure this function
+  // exists to prevent). Excludes '0' implicitly being meaningless as a point
+  // marker; the lookbehind still keeps multi-digit numbers/years excluded.
+  const withBreaks = text.replace(/(?<!\p{Nd})(\p{Nd})\.(\s+)(?=[\p{Lu}\p{Nd}])/gu, '\n\n$1.$2');
   // The rule above also fires on markers already correctly at the start of
   // their own paragraph, producing 3+ newlines in a row — collapse any run
   // of blank lines down to exactly one, and drop a leading blank line.
@@ -1784,9 +1792,18 @@ function ensureSectionSpacing(text: string): string {
   // ending up as two separate, unlabeled blocks once split below). Re-attach
   // a bare "N." marker to whatever line immediately follows it before any
   // other classification runs.
+  // \p{Nd} (not plain \d) everywhere below — same reasoning as
+  // ensureNumberedListSpacing above: the model sometimes bolds the point
+  // marker itself, and convertMarkdownBoldToUnicode (which runs before this)
+  // turns "1" into the Unicode Mathematical Bold digit "𝟏", which plain \d
+  // never matches. A missed match here doesn't just skip a spacing fix —
+  // it makes this whole line-rebuild misclassify the point as a "plain
+  // paragraph" instead of a numbered one, so its own long-paragraph splitter
+  // (below) wrongly tears the point's own sentences apart into separate
+  // blocks (confirmed live 2026-09-25 on a real post).
   const lines: string[] = [];
   for (let j = 0; j < rawLines.length; j++) {
-    if (/^\d+\.$/.test(rawLines[j]) && j + 1 < rawLines.length) {
+    if (/^\p{Nd}+\.$/u.test(rawLines[j]) && j + 1 < rawLines.length) {
       lines.push(`${rawLines[j]} ${rawLines[j + 1]}`);
       j++;
     } else {
@@ -1796,7 +1813,7 @@ function ensureSectionSpacing(text: string): string {
   if (lines.length === 0) return text;
 
   const isBullet = (l: string) => l.startsWith('•');
-  const isNumberedPoint = (l: string) => /^\d+\.\s/.test(l);
+  const isNumberedPoint = (l: string) => /^\p{Nd}+\.\s/u.test(l);
   const isUrlOnly = (l: string) => /^https?:\/\/\S+$/.test(l);
   const isHashtagBlock = (l: string) => /^#[\w-]+(?:\s+#[\w-]+)*$/.test(l);
   const isDataSource = (l: string) => /^Data source:/i.test(l);
@@ -1819,7 +1836,7 @@ function ensureSectionSpacing(text: string): string {
       const lastIdx = group.length - 1;
       const bulletMarkerLen = group[lastIdx].match(/^•\s*/)![0].length;
       const afterBulletMarker = group[lastIdx].slice(bulletMarkerLen);
-      const bulletSentenceEnd = afterBulletMarker.search(/\.\s+(?=[A-Z])/);
+      const bulletSentenceEnd = afterBulletMarker.search(/\.\s+(?=[\p{Lu}\p{Nd}])/u);
       let bulletSpillover = '';
       if (bulletSentenceEnd !== -1) {
         group[lastIdx] = group[lastIdx].slice(0, bulletMarkerLen + bulletSentenceEnd + 1);
@@ -1834,27 +1851,33 @@ function ensureSectionSpacing(text: string): string {
       i++;
       continue;
     }
-    // A numbered point is supposed to be exactly one sentence (per the
-    // prompt's own "Format each as one flowing sentence" rule), but the
-    // model sometimes keeps writing past it on the same line — running the
-    // next section's prose (and even the CTA/URL) straight into the last
-    // numbered point with no newline at all for the earlier checks above to
-    // find. Cut the line at the end of its first sentence and start a new
-    // block with whatever follows.
+    // A numbered point may legitimately be ONE sentence (FB) or TWO —
+    // a stat sentence plus its implication sentence (LI's own prompt: "those
+    // sentences stay TOGETHER on the same paragraph with NO blank line
+    // between them"). Splitting at the FIRST sentence boundary (the old
+    // behavior) tore every 2-sentence LI point in half — confirmed live
+    // 2026-09-25, every point on a real post got its implication sentence
+    // wrongly exiled into its own paragraph. Only split when there's a
+    // SECOND boundary — i.e. 3+ sentences, which really is the model
+    // running the next section's prose (or even the CTA/URL) straight into
+    // the point with no newline for the earlier checks to find. With 3+
+    // sentences, keep the first two (stat + implication) together and treat
+    // everything after the second boundary as spillover.
     if (isNumberedPoint(line)) {
-      const markerLen = line.match(/^\d+\.\s+/)![0].length;
+      const markerLen = line.match(/^\p{Nd}+\.\s+/u)![0].length;
       const afterMarker = line.slice(markerLen);
-      const sentenceEnd = afterMarker.search(/\.\s+(?=[A-Z])/);
-      if (sentenceEnd !== -1) {
+      const boundaries = [...afterMarker.matchAll(/\.\s+(?=[\p{Lu}\p{Nd}])/gu)];
+      if (boundaries.length >= 2) {
+        const sentenceEnd = boundaries[1].index!; // index of the "." itself, same as the old .search() semantics
         blocks.push(line.slice(0, markerLen + sentenceEnd + 1));
         const rest = afterMarker.slice(sentenceEnd + 1).trim();
         if (rest) blocks.push(rest);
         i++;
         continue;
       }
-      // Single-sentence numbered point (the common case, and the intended
-      // format per the prompt) — push it whole. Falling through to the
-      // plain-paragraph rule below would be wrong: that rule's own sentence-
+      // One or two sentences (the common case, and the intended format per
+      // the prompt) — push it whole. Falling through to the plain-paragraph
+      // rule below would be wrong: that rule's own sentence-
       // boundary scan matches the leading "N. " marker itself (digit, period,
       // space, capital letter — indistinguishable from a real sentence end),
       // severing the number from its own content (confirmed live: "2." ends
@@ -1874,7 +1897,7 @@ function ensureSectionSpacing(text: string): string {
     // should stand out on its own line regardless of the model's exact
     // wording, so this doesn't hardcode any particular phrase.
     if (line.length > 160) {
-      const sentenceBoundaries = [...line.matchAll(/\.\s+(?=[A-Z])/g)];
+      const sentenceBoundaries = [...line.matchAll(/\.\s+(?=[\p{Lu}\p{Nd}])/gu)];
       const lastBoundary = sentenceBoundaries[sentenceBoundaries.length - 1];
       if (lastBoundary) {
         const splitAt = lastBoundary.index! + lastBoundary[0].length;
@@ -2011,29 +2034,45 @@ export async function generateLiPostFromFivePrompts(params: { url: string; title
 // topic label — see NUMBERED_FINDINGS_RULE below, shared across all styles.
 const NUMBERED_FINDINGS_RULE = `each point must be exactly TWO sentences on the same line: the first sentence states the specific stat, named entity, or comparison from the web data; the second sentence is a distinct implication sentence explaining what it means for banks, issuers, or investors (not a restatement of the first sentence). No topic labels, no em dash, no single-sentence points.`;
 
-// Every hook below must mention "**Ken Research**" somewhere in the opening
-// sentence — but NOT always as the first word. Vary where it lands (start,
-// middle, or end of that sentence) from one generation to the next, so the
-// post doesn't read as the same template every time. Each hook lists one
-// example per position — pick whichever position fits the specific market
-// data best, not always the same one.
-const HOOK_PLACEMENT_RULE = 'Vary where "**Ken Research**" lands in the opening sentence across generations — start, middle, or end — do not always lead with it.';
+// Hooks used to be prose PATTERN DESCRIPTIONS ("write a fresh hook inspired
+// by this idea, here's one example"), asking the model to improvise a new
+// sentence every time. That failed two ways, both confirmed on live posts:
+// (1) the model ignored "don't reuse the example wording" and copied the
+// example almost verbatim with only the market name swapped in (e.g. the
+// Saudi Arabia Outdoor Play Structures and Philippines BPO posts both came
+// back as "[N] signals in the [market] market say something most people are
+// still missing" — the literal example text); (2) when it didn't reuse an
+// example, it fell back to a generic, low-signal opening instead (e.g.
+// "Mexico baby food infant nutrition market in 4 numbers, and one
+// question."). Fixed sentence TEMPLATES remove both failure modes at the
+// root: the wording is locked, so there is nothing left for the model to
+// improvise or drift on — it only fills the bracketed slots with real data
+// pulled from the web data section below (never invented, never generic).
+const HOOK_TEMPLATES: string[] = [
+  `Why did [entity] [surprising real action/metric, with its exact number and year, from the web data below] — a figure that starkly contrasts with [the real contrasting trend or expectation from the web data below]?`,
+  `There is a layer under the [market] market size that most decision-makers never check before deploying capital.`,
+  `The [market] sector presents a growth profile that appears robust on the surface, yet it masks significant structural hurdles.`,
+  `The [market] market is heading toward [real forecast value from the web data below] by [real year from the web data below], a trajectory that hinges on one critical variable for [decision-maker audience, e.g. "infrastructure investors" or "portfolio strategists"].`,
+  `[N] signals in the [market] market say something most people are still missing.`,
+];
+
+function pickHook(): string {
+  const template = HOOK_TEMPLATES[Math.floor(Math.random() * HOOK_TEMPLATES.length)];
+  return `Use EXACTLY this sentence template, filling in ONLY the bracketed [slots] with real data from the web data below (never invented, never left generic) — do not add, remove, or reword anything outside the brackets: "${template}"`;
+}
 
 const FB_STYLES = [
   {
-    hook: `Opening Hook – a contrarian claim that challenges where most people assume the growth story is happening. ${HOOK_PLACEMENT_RULE} Examples: start – "**Ken Research** flags a GCC card story most people are watching in the wrong country." | middle – "Most coverage of GCC card markets is watching the wrong country, and **Ken Research**'s latest tracking shows exactly why." | end – "A card market most people have written off as too small to matter is quietly outgrowing its neighbors, at least according to **Ken Research**." No em dash, no emoji.`,
     body: `2. Context and Scale – 1-2 sentences, no em dash: market value, growth rate, and where the real momentum is versus common assumption, using real numbers.
 3. Numbered Findings – exactly 3 numbered points (never "•"); ${NUMBERED_FINDINGS_RULE}
 4. Closing – 2 sentences, no em dash: why the quiet/early window matters now, tied to a specific year or threshold.`,
   },
   {
-    hook: `Opening Hook – a sharp, specific question about the market (not a generic "what does the future hold" question). ${HOOK_PLACEMENT_RULE} Examples: start – "**Ken Research** just asked why credit card penetration in Oman remains one of the lowest in the Gulf, even as its banking sector modernizes." | middle – "Why does credit card penetration in Oman still trail the rest of the Gulf? **Ken Research** raises the question as the country's banking sector modernizes fast." | end – "Credit card penetration in Oman remains one of the lowest in the Gulf, even as its banking sector modernizes fast, a gap **Ken Research** is now asking banks to explain." No em dash, no emoji.`,
     body: `2. Why the Question Matters – 1-2 sentences, no em dash: the specific tension in the data that makes this question live right now.
 3. Numbered Findings – exactly 3 numbered points (never "•"); ${NUMBERED_FINDINGS_RULE}
 4. Closing – 2 sentences, no em dash: what answering this question correctly is worth to the reader over a specific time horizon.`,
   },
   {
-    hook: `Opening Hook – "[market] in [N] numbers, and one question" (N = however many numbered points follow). ${HOOK_PLACEMENT_RULE} Examples: start – "**Ken Research** breaks down the Oman credit card market in 4 numbers, and one question." | middle – "The Oman credit card market comes down to 4 numbers and one question, according to **Ken Research**." | end – "4 numbers and one question define where the Oman credit card market is really headed, per **Ken Research**'s latest tracking." No em dash, no emoji.`,
     body: `2. Numbered Findings – exactly 4 numbered points (never "•"); ${NUMBERED_FINDINGS_RULE}
 3. The Question – 1 sharp sentence naming the real strategic question the four numbers add up to.
 4. Closing – 1-2 sentences, no em dash, tying the question back to what **Ken Research**'s full report resolves.`,
@@ -2053,7 +2092,6 @@ const LI_STYLES = [
     voiceRules: `- Do not write like a brand copywriter or like Ken Research is promoting itself
 - Never use "we", "our", or "at Ken Research"
 - Write like a consultant analyzing the market and citing Ken Research data as evidence, not the subject`,
-    hook: 'Opening – one strong factual line using market size, forecast size, CAGR, or a key market shift from the web data. Then one sentence on why the headline number alone is not enough to understand the opportunity.',
     sections: `2. Factual market signals – exactly 4-6 numbered points, each with a specific number/%/CAGR and its year, drawn only from the web data below
 3. Interpretation – 1-2 sentences on what these signals mean for CEOs, investors, and expansion teams
 4. Strategic question – one sharp sentence naming the main question decision-makers should ask before acting`,
@@ -2065,7 +2103,6 @@ const LI_STYLES = [
     voiceRules: `- Do not write like a brand copywriter or like Ken Research is promoting itself
 - Never use "we", "our", or "at Ken Research"; mention Ken Research only as the data source
 - Naturally use 3-4 of these terms where they add meaning, without keyword-stuffing: market intelligence, market attractiveness, whitespace opportunities, competition benchmarking, go-to-market strategy, decision-ready intelligence`,
-    hook: 'Opening – "5 data-backed signals are shaping the [market] market." followed by one line on why the latest available data matters.',
     sections: `2. Data signals – exactly 4-6 numbered signals, each: one factual sentence (number, year, source context) from the web data, then one interpretation sentence on what it means for decision-makers
 3. Strategic interpretation – 1-2 sentences on where market attractiveness and whitespace opportunities are forming, and what leaders should evaluate before acting
 4. Sharp question – one sentence framing where growth is concentrated, defensible, and commercially viable (not just whether it exists)`,
@@ -2077,7 +2114,6 @@ const LI_STYLES = [
     voiceRules: `- Do not write for general readers and do not explain basic market concepts
 - Never use "we", "our", or "at Ken Research"; mention Ken Research only as the primary source
 - Use one engagement angle: contrarian ("attractive, but not every segment deserves capital"), boardroom question, capital allocation, risk-validation, or whitespace framing`,
-    hook: 'Opening – a decision-maker hook such as "For decision-makers evaluating [market], the headline market size is only the first layer" or "Before allocating capital to [market], decision-makers need to separate market growth from investable growth."',
     sections: `2. Decision-relevant facts – exactly 4-5 numbered points, each ONE natural sentence that blends the factual statement (year/number from web data) with what it means for a decision-maker — write it as flowing analysis, not a fact followed by a separate labeled line
 3. Strategic interpretation – 1-2 sentences on where market attractiveness is increasing, where whitespace opportunities are forming, and which risks need validation
 4. Decision-maker question – one sharp sentence, e.g. "The key question is not whether the market is growing. The key question is which segment is attractive, scalable, defensible, and financially viable."`,
@@ -2089,7 +2125,6 @@ const LI_STYLES = [
     voiceRules: `- Never use "we", "our", "at Ken Research", or the phrase "Ken Research Executive Summary"
 - Attribute data using phrasing like "Ken Research data indicates…", "According to Ken Research market data…", or "Ken Research identifies…"
 - Create tension between market size and commercial viability, growth and defensibility, or opportunity and execution risk`,
-    hook: 'Opening – a decision-maker hook such as "The [market] market cannot be evaluated only through CAGR" or "Market size confirms relevance. It does not confirm pricing power, margin potential, or defensible entry." Follow with the factual market size/CAGR figure and its year from the web data.',
     sections: `2. Decision-relevant signals – exactly 4-5 numbered points, each ONE natural sentence that blends the factual statement (number/year from web data) with its decision-maker implication (entry, pricing, margin, risk, capital allocation) — no fixed label, write it as one flowing thought
 3. Strategic interpretation – 1-2 sentences on where market attractiveness and whitespace opportunities are forming, and which risks affect entry or expansion
 4. Sharp question – one sentence on which segment is attractive, scalable, defensible, and financially viable — not just whether the market is growing`,
@@ -2101,7 +2136,6 @@ const LI_STYLES = [
     voiceRules: `- Never use "we", "our", "at Ken Research", or the phrase "Ken Research Executive Summary"
 - Attribute data using phrasing like "Ken Research data places…", "Ken Research identifies…", or "Primary market source: Ken Research."
 - Core message: market size confirms relevance, not where to enter, how to win, or where capital should be deployed`,
-    hook: 'Opening – a 2-line scroll-stopper such as "The risk is not missing the market. The risk is reading it late." or "A market can be attractive and still be entered wrongly." followed by one setup line naming the market and the question beyond size.',
     sections: `2. Signals – exactly 3-4 numbered points, each ONE natural sentence that blends the factual statement (number/year from web data) with why it matters and the risk of misreading it — no fixed labels or repeated phrases across points, vary the wording point to point
 3. Decision-risk lens – 1-2 sentences contrasting the wrong lens (market size, CAGR, broad demand) with the better lens (demand depth, segment attractiveness, competition benchmarking, operational and financial viability)
 4. Boardroom line – one sharp sentence, e.g. "The cost of an outdated market view is not only missed growth. It is misallocated capital."`,
@@ -2153,6 +2187,7 @@ async function generateFbPostRaw(params: {
     : 'No web data available — use general market language without inventing numbers.';
 
   const style = FB_STYLES[Math.floor(Math.random() * FB_STYLES.length)];
+  const hook = pickHook();
 
   const prompt = `You are a professional B2B content writer producing a Facebook post that presents Ken Research's own market intelligence.
 
@@ -2168,7 +2203,7 @@ TONE AND STYLE:
 - Every section must include at least one specific number, percentage, or named company from the web data
 
 POST STRUCTURE (use exactly this order, one blank line between each section):
-1. ${style.hook}
+1. Opening Hook – ${hook}
 ${style.body}
 5. CTA – choose one from the approved list below, on its own line, followed immediately by the UTM URL on the same line
 
@@ -2269,6 +2304,7 @@ async function generateLiPostRaw(params: {
     : 'No web data available — use general market language without inventing numbers.';
 
   const style = LI_STYLES[Math.floor(Math.random() * LI_STYLES.length)];
+  const hook = pickHook();
 
   const banRule = style.banPhrase
     ? `- Never use the phrase "${style.banPhrase}" anywhere in the post`
@@ -2289,7 +2325,9 @@ DATA RULE: Every numbered signal must include at least one specific number, perc
 SOURCE RULE: The only sources you may ever name in this post are Ken Research and government/regulatory bodies (ministries, directives, acts). Never name or cite any other market-research firm (e.g. Mordor Intelligence, IMARC, MarketsandMarkets, Technavio, Precedence Research, Future Market Insights, Renub Research, or similar) — they are Ken Research's direct competitors and must never appear in this post, even as a supporting or secondary reference. If a figure in the web data is only attributable to one of those firms, either use the figure without naming its source, or drop it entirely.
 
 POST STRUCTURE — one blank line between EVERY section AND between EVERY numbered point (never run two numbered points together on adjacent lines; each one is its own paragraph). This applies EVEN WHEN a point starts with a number instead of a word — e.g. "3. 30 platforms specialize in..." still needs its own blank-line-separated paragraph, exactly like "2. Adoption rates show...":
-1. ${style.hook}
+CRITICAL — do not confuse "between points" with "inside a point": if a numbered point has more than one sentence (a stat sentence plus its implication sentence), those sentences stay TOGETHER on the same paragraph with NO blank line between them — the blank line goes only AFTER the whole point, before the next point starts. Never split a single point's own sentences apart with a blank line. Also do not merge the Interpretation and Strategic-question sections into the last numbered point or into each other — each of those is its own paragraph, with a blank line before it, exactly like every numbered point above it. Every section boundary (last numbered point -> Interpretation -> Strategic question -> CTA) gets exactly one blank line; there is no case where two of these run together with zero blank lines, and no case where one point's own sentences are separated by a blank line.
+LENGTH CAPS (applies no matter which persona/style is used below): each numbered point, once its sentences are combined into one paragraph, should read as roughly 3-4 lines when wrapped on LinkedIn's mobile width (about 2 sentences) — not a single bare stat line, and not padded past that into a third or fourth sentence. The Interpretation and Strategic-question paragraphs are a hard ceiling of 2 lines EACH (1 short sentence apiece) — treat any "1-2 sentences" wording in the persona instructions below as that same ceiling, not a target to fill; when in doubt, write the shorter version. Go straight from the Strategic-question line into the CTA — do not add any extra closing sentence.
+1. Opening – ${hook}
 ${style.sections}
 5. CTA — "${style.ctaVerb}:" on its own line, followed immediately by the URL on the next line
 6. Mention Ken Research only as the data source (never "we"/"our"/"at Ken Research")
@@ -2299,13 +2337,15 @@ ${style.sections}
 EXACT SPACING EXAMPLE (structure only — invent nothing from this, use your own real numbers/claims):
 Opening hook line naming the market.
 
-2. First signal with a number, then why it matters.
+2. First signal with a number. This is its implication sentence, staying on the SAME paragraph as the sentence before it — no blank line between these two sentences.
 
-3. Second signal that itself starts with a number, like "45 companies now..." — still its own paragraph.
+3. Second signal that itself starts with a number, like "45 companies now..." — still its own paragraph, its own implication sentence attached with no gap.
 
-4. Third signal, own paragraph.
+4. Third signal, own paragraph, same rule.
 
-Decision-risk sentence.
+Interpretation sentence(s) — its own paragraph, separated from point 4 above by exactly one blank line (never zero, never merged into point 4).
+
+Strategic question sentence — its own paragraph, separated from the interpretation above by exactly one blank line.
 
 For decision-makers, review the full breakdown here:
 ${utmUrl}
@@ -2336,6 +2376,17 @@ export async function generateMediumPost(row: SheetRow): Promise<string> {
   }
   // Inject UTM parameters into the content
   return injectUTM(content, UTM_PARAMS.Medium);
+}
+
+/**
+ * Generate vc.ru post — uses pre-written content from sheet (no LLM)
+ */
+export async function generateVcruPost(row: SheetRow): Promise<string> {
+  const content = (row.blogContent || '').trim();
+  if (!content) {
+    throw new Error('No blog content provided (Blog Content for all column is empty)');
+  }
+  return injectUTM(content, UTM_PARAMS.Vcru);
 }
 
 /**
@@ -2402,11 +2453,19 @@ export async function generateLinkedinPulsePost(row: SheetRow): Promise<{ title:
     throw new Error('No blog content provided (Blog Content for all column is empty)');
   }
 
+  // Confirmed live 2026-09-23: seoDescription used to be hardcoded to
+  // mainTitle, which is why the post-Next "Tell your network" share box
+  // ended up showing the article's own title instead of an actual
+  // description — poster.ts fills that box with seoDescription first.
+  // Use the real description/caption columns instead, only falling back
+  // to the title if neither has anything.
+  const realDescription = (row.description || '').trim() || mainTitle;
+
   return {
     title: mainTitle,
     html: injectUTM(blogContent, UTM_PARAMS.LinkedIn),
     seoTitle: mainTitle,
-    seoDescription: mainTitle,
+    seoDescription: realDescription,
   };
 }
 

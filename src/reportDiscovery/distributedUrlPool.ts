@@ -5,8 +5,9 @@
  * Media).
  *
  * Source: the separate "Distributed URL" spreadsheet
- * (1ZbEcDaK-zb6U1SK1P23UIjezN5NGdy3R15r9W-glVlU), tabs "Report R.P",
- * "Report R.A", "Report R.S", "Report R.V" — cycled in that fixed order.
+ * (1ZbEcDaK-zb6U1SK1P23UIjezN5NGdy3R15r9W-glVlU), tabs "Report R.S",
+ * "Report R.V", "Report R.P", "Report R.A" — cycled in that fixed order
+ * (R.S and R.V prioritized first, per explicit instruction 2026-09-17).
  * Each tab is [URL, Title], no status columns, so "already used" is tracked
  * locally (not written back to that sheet) via a per-purpose cursor file —
  * New Logic and Social Media each get their own independent cursor, so the
@@ -21,7 +22,7 @@ import path from 'path';
 import { google } from 'googleapis';
 
 const DISTRIBUTED_URL_SHEET_ID = '1ZbEcDaK-zb6U1SK1P23UIjezN5NGdy3R15r9W-glVlU';
-const TAB_ORDER = ['Report R.P', 'Report R.A', 'Report R.S', 'Report R.V'];
+const TAB_ORDER = ['Report R.S', 'Report R.V', 'Report R.P', 'Report R.A'];
 
 export type PoolPurpose = 'newLogic' | 'socialMedia';
 

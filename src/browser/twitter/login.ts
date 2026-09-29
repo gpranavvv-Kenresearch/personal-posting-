@@ -28,7 +28,7 @@ async function launchPersistentChrome(profileDir: string): Promise<{ context: Br
   await killChromeForProfile(profileDir);
 
   const context = await chromium.launchPersistentContext(profileDir, {
-    headless: false,
+    headless: process.env.HEADLESS === 'true',
     chromiumSandbox: true,
     executablePath: fs.existsSync(chromePath) ? chromePath : undefined,
     channel: fs.existsSync(chromePath) ? undefined : 'chrome',

@@ -14,6 +14,9 @@
 // converted into a text-file attachment instead of landing in the composer.
 
 import { Page } from 'playwright';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import { COMPOSER_SELECTOR } from '../browser/chatgpt/login.js';
 
 /**
@@ -86,6 +89,26 @@ export async function dismissBlockingModals(page: Page): Promise<boolean> {
   return removedNamed || removedGeneric || removedGotIt;
 }
 
+// Confirmed live 2026-09-24: the composer sometimes never appears at all —
+// the page loaded but chatgpt.com's own SPA render never finished — and
+// this used to just throw once after one flat 15s wait. A hard refresh
+// fixes a stuck SPA render far more reliably than waiting longer on the
+// same broken page: wait 5s, hard refresh, wait 5s, then check once more.
+// Same pattern applied in li-carousel-storyline/scripts/generateStoryline.ts
+// and generateImages.ts (their own separate, standalone copy of this file).
+async function waitForComposerWithReload(page: Page, composer: import('playwright').Locator): Promise<void> {
+  const visible = await composer.waitFor({ state: 'visible', timeout: 5000 }).then(() => true).catch(() => false);
+  if (visible) return;
+
+  console.log('   [composer] Composer not visible — hard refreshing...');
+  await page.waitForTimeout(5000);
+  await page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+  await page.waitForTimeout(5000);
+  await dismissBlockingModals(page);
+
+  await composer.waitFor({ state: 'visible', timeout: 15000 });
+}
+
 export async function pasteIntoChatGptComposer(
   page: Page,
   text: string,
@@ -97,7 +120,7 @@ export async function pasteIntoChatGptComposer(
   await dismissBlockingModals(page);
 
   const composer = page.locator(COMPOSER_SELECTOR).first();
-  await composer.waitFor({ state: 'visible', timeout: 15000 });
+  await waitForComposerWithReload(page, composer);
   await composer.click();
   await page.waitForTimeout(300);
 
@@ -179,4 +202,62 @@ async function detectPastedAttachment(page: Page, text: string): Promise<boolean
 
 async function readComposerLength(composer: ReturnType<Page['locator']>): Promise<number> {
   return await composer.evaluate((el: Element) => ((el as HTMLElement).textContent || (el as HTMLElement).innerText || '').length);
+}
+
+/**
+ * Deterministic alternative to pasteIntoChatGptComposer() for the huge
+ * (40k+ character) blog/image master prompts. Instead of pasting the text
+ * and hoping ChatGPT's own "Extended mode" auto-converts an oversized paste
+ * into a file attachment — confirmed live to be inconsistent (a paste can
+ * land as 0/12220 chars, fall back to keyboard.insertText, and only THEN get
+ * detected as an attachment after the fact) — this writes the prompt to a
+ * real local .txt file and attaches it directly via ChatGPT's own (visually
+ * hidden but always-present) file input, the same pattern already used for
+ * file uploads elsewhere in this repo (see src/browser/pdfhost/poster.ts,
+ * src/browser/scribd/poster.ts). Falls back to pasteIntoChatGptComposer()
+ * if no file input is found, so this can never become a hard blocker.
+ */
+export async function attachPromptAsTextFile(
+  page: Page,
+  text: string,
+  opts: { filename?: string; instruction?: string } = {},
+): Promise<void> {
+  const filename = opts.filename || 'prompt.txt';
+  const tmpPath = path.join(os.tmpdir(), `chatgpt-prompt-${Date.now()}-${filename}`);
+  fs.writeFileSync(tmpPath, text, 'utf-8');
+
+  try {
+    await dismissBlockingModals(page);
+    const composer = page.locator(COMPOSER_SELECTOR).first();
+    await waitForComposerWithReload(page, composer);
+
+    const fileInput = page.locator('input[type="file"]').first();
+    const inputExists = await fileInput.count().then((n) => n > 0).catch(() => false);
+    if (!inputExists) {
+      console.log('   [composer] No file input found for direct attach — falling back to clipboard paste.');
+      await pasteIntoChatGptComposer(page, text);
+      return;
+    }
+
+    await fileInput.setInputFiles(tmpPath);
+    await page.waitForTimeout(2500);
+
+    const chipVisible = await page.getByText(filename, { exact: false }).first().isVisible({ timeout: 8000 }).catch(() => false);
+    console.log(chipVisible
+      ? '   [composer] Prompt file attached — confirmed chip visible.'
+      : '   [composer] Prompt file attached — chip not confirmed visible, proceeding anyway.');
+
+    if (opts.instruction) {
+      await composer.click();
+      await page.keyboard.insertText(opts.instruction);
+      await page.waitForTimeout(300);
+    }
+
+    // Give the attachment a moment to finish uploading/processing before the
+    // caller tries to hit Send — confirmed live 2026-09-28: sending too soon
+    // after attach can silently no-op.
+    await page.waitForTimeout(5000);
+  } finally {
+    fs.unlink(tmpPath, () => {});
+  }
 }

@@ -19,9 +19,10 @@ import { sessionDirForAccount, recordChatGptFailure, recordChatGptSuccess } from
 import { killChromeForProfile } from '../utils/killChrome.js';
 import { pasteIntoChatGptComposer, dismissBlockingModals } from '../utils/chatgptComposer.js';
 
-const COMPOSER_SELECTOR = '#prompt-textarea';
-const LOGIN_BUTTON_SELECTOR = 'button:has-text("Log in"), a:has-text("Log in")';
-const MANUAL_LOGIN_TIMEOUT_MS = 120_000;
+// Matches both the old #prompt-textarea id and the new UI's bare
+// div.ProseMirror composer (no id) — see the comment on the canonical
+// definition in src/browser/chatgpt/login.ts for the full explanation.
+const COMPOSER_SELECTOR = '#prompt-textarea, div[contenteditable="true"].ProseMirror';
 
 // Dedicated account for this flow, separate from blogGenAgent.ts (default),
 // blogImageAgent.ts (account2), and any others already in rotation — so all
@@ -271,21 +272,14 @@ async function minimizeToTaskbar(context: BrowserContext, page: Page): Promise<v
   } catch { /* ignore if CDP unavailable */ }
 }
 
-async function waitUntilLoggedIn(page: Page): Promise<boolean> {
-  if (await isLoggedIn(page)) {
-    console.log('   ✅ ChatGPT: already logged in (session restored)');
-    return true;
-  }
-  const loginBtn = page.locator(LOGIN_BUTTON_SELECTOR).first();
-  if (await loginBtn.isVisible().catch(() => false)) await loginBtn.click().catch(() => {});
-  console.log(`   ⚠️  ChatGPT: no active session — restore the minimized Chrome window from the taskbar and log in manually (waiting up to ${MANUAL_LOGIN_TIMEOUT_MS / 1000}s)...`);
-  try {
-    await page.locator(COMPOSER_SELECTOR).first().waitFor({ state: 'visible', timeout: MANUAL_LOGIN_TIMEOUT_MS });
-    console.log('   ✅ ChatGPT: manual login detected — session saved for future runs');
-    return true;
-  } catch {
-    return false;
-  }
+// Diagnostic only — never blocks for a manual login and never aborts the
+// run. These generate scripts run unattended under the cron daemon, where
+// nobody is watching to log in by hand, so the old 120s manual-login wait
+// just stalled the batch before failing anyway.
+async function logChatGptSessionState(page: Page): Promise<void> {
+  console.log(await isLoggedIn(page)
+    ? '   ✅ ChatGPT: session active (composer visible)'
+    : '   ⚠️  ChatGPT: composer not visible — continuing anyway (session may be expired)');
 }
 
 /**
@@ -330,9 +324,7 @@ export async function generateSocialPostImageLocalOnly(params: {
     await page.goto('https://chatgpt.com/new', { waitUntil: 'domcontentloaded', timeout: 60000 });
     await page.waitForTimeout(2000);
 
-    if (!(await waitUntilLoggedIn(page))) {
-      throw new Error(`ChatGPT (account "${accountName}"): not logged in and manual login was not completed in time.`);
-    }
+    await logChatGptSessionState(page);
 
     console.log(`   [social-image:${accountName}] Sending social-card prompt for: "${params.title}"...`);
     await pasteIntoChatGptComposer(page, prompt);

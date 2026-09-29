@@ -29,17 +29,48 @@ export async function postToLinkedinPulse(
     await page.goto('https://www.linkedin.com/article/new/', { waitUntil: 'domcontentloaded', timeout: 30000 });
 
     // Fill Title
+    // Confirmed reported live: for some accounts the title field silently
+    // never got filled at all before the body paste — the previous code
+    // swallowed the waitForSelector timeout and then just skipped the fill
+    // with no warning logged if isVisible() came back false. Poll instead
+    // of one wait, and if it's still not there, dump evidence and warn
+    // loudly rather than continuing on as if nothing happened.
     console.log('   Filling article title...');
-    await page.waitForSelector('#article-editor-headline__textarea', { timeout: 20000 }).catch(() => {});
     const titleField = page.locator('#article-editor-headline__textarea').first();
+    const titleCheckpointsSec = [1, 2, 3, 5, 8, 12, 20];
+    let titleVisible = false;
+    let titleElapsedSec = 0;
+    for (const checkpointSec of titleCheckpointsSec) {
+      await page.waitForTimeout((checkpointSec - titleElapsedSec) * 1000);
+      titleElapsedSec = checkpointSec;
+      titleVisible = await titleField.isVisible().catch(() => false);
+      if (titleVisible) break;
+    }
 
-    if (await titleField.isVisible().catch(() => false)) {
+    if (titleVisible) {
       await titleField.click({ delay: 150 });
       await page.keyboard.press('Control+A').catch(() => {});
       await page.keyboard.press('Delete').catch(() => {});
       await randomDelay(200, 400);
       await page.keyboard.insertText(title);
       await randomDelay(600, 1000);
+
+      // Verify the title actually landed — the click can succeed against a
+      // detached/stale element while typing goes nowhere.
+      const typedTitle = await titleField.inputValue().catch(() => '');
+      if (!typedTitle.trim()) {
+        console.warn(`   ⚠️  Title field was visible but appears empty after typing — the fill may not have taken.`);
+      }
+    } else {
+      const debugDir = 'logs/li-pulse-debug';
+      try {
+        const fs = await import('fs');
+        fs.mkdirSync(debugDir, { recursive: true });
+        const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+        await page.screenshot({ path: `${debugDir}/title-not-found-${stamp}.png` }).catch(() => {});
+        fs.writeFileSync(`${debugDir}/title-not-found-${stamp}.html`, await page.content().catch(() => ''), 'utf8');
+        console.warn(`   ⚠️  Title field ("#article-editor-headline__textarea") never became visible after 20s — title was NOT filled. Dumped ${debugDir}/title-not-found-${stamp}.*`);
+      } catch { /* ignore debug-dump failures */ }
     }
 
     // Paste Body — render HTML in temp page → copy → paste into editor
@@ -72,8 +103,9 @@ export async function postToLinkedinPulse(
       console.warn(`   ⚠️ Could not paste body: ${(err as any).message}`);
     }
 
-    // Fill SEO Fields via Manage > Settings
-    if (seoTitle || seoDescription) {
+    // Fill SEO Fields via Manage > Settings — description only, SEO title
+    // is intentionally never filled here.
+    if (seoDescription) {
       console.log('   Filling SEO fields...');
       try {
         const manageBtn = page.locator('button[aria-label="Manage menu"], button:has-text("Manage")').first();
@@ -86,16 +118,6 @@ export async function postToLinkedinPulse(
             await settingsItem.click({ delay: 160 }).catch(() => {});
             await randomDelay(1500, 2000);
 
-            // Fill SEO Title
-            const seoTitleInput = page.locator('input[name="seoTitle"]').first();
-            if (await seoTitleInput.isVisible().catch(() => false) && seoTitle) {
-              await seoTitleInput.click({ delay: 120 });
-              await page.keyboard.press('Control+A').catch(() => {});
-              await page.keyboard.press('Delete').catch(() => {});
-              await page.keyboard.insertText(seoTitle);
-              await randomDelay(400, 600);
-            }
-
             // Fill SEO Description
             const seoDescInput = page.locator('textarea[name="seoDescription"]').first();
             if (await seoDescInput.isVisible().catch(() => false) && seoDescription) {
@@ -106,10 +128,14 @@ export async function postToLinkedinPulse(
               await randomDelay(400, 600);
             }
 
-            // Save SEO settings
+            // Save SEO settings — click once, wait, then hard-click again
+            // (no visibility check on the second click) since the modal
+            // sometimes needs a second confirming click to actually save.
             const saveBtn = page.locator('button.artdeco-button--primary:has-text("Save")').first();
             if (await saveBtn.isVisible().catch(() => false)) {
               await saveBtn.click({ delay: 150 }).catch(() => {});
+              await sleep(2000);
+              await saveBtn.click({ delay: 150, force: true }).catch(() => {});
               await randomDelay(1200, 1600);
             }
           }
@@ -143,7 +169,7 @@ export async function postToLinkedinPulse(
     await page.waitForSelector('div[role="textbox"][data-placeholder*="Tell your network"]', { timeout: 15000 }).catch(() => {});
 
     const shareBox = page.locator('div[role="textbox"][data-placeholder*="Tell your network"]').first();
-    const shareText = shareCaption || seoDescription;
+    const shareText = seoDescription || shareCaption;
     if (await shareBox.isVisible().catch(() => false) && shareText) {
       await shareBox.click({ delay: 120 }).catch(() => {});
       await page.keyboard.press('Control+A').catch(() => {});

@@ -131,6 +131,24 @@ async function processRow(sheets, rowNum) {
   }
   console.log(`Image saved: ${imagePath}`);
 
+  // Generation above can take several minutes. Re-read this row's title
+  // right before writing — if it no longer matches what we generated the
+  // image for, something reassigned this row to a different report while
+  // we were mid-generation, and writing now would silently pair this
+  // market's image with a different market's row (confirmed live: e.g.
+  // row 141 ended up with "argentina-agriculture-market.png" under a
+  // "South Africa Professional Skincare Products Market" title). Skip the
+  // write instead of corrupting the row.
+  const recheck = await sheets.spreadsheets.values.get({
+    spreadsheetId: SHEET_ID,
+    range: `'${TAB}'!B${rowNum}`,
+  });
+  const currentTitle = (recheck.data.values?.[0]?.[0] ?? '').trim();
+  if (currentTitle !== title) {
+    console.error(`Row ${rowNum}: title changed during generation (was "${title}", now "${currentTitle}") — skipping write to avoid a wrong image/title pairing.`);
+    return { row: rowNum, ok: false, reason: 'title changed during generation' };
+  }
+
   console.log(`\nWriting image path back to row ${rowNum}, column ${colLetter(COL_E)}...`);
   await sheets.spreadsheets.values.update({
     spreadsheetId: SHEET_ID,

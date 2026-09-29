@@ -45,6 +45,12 @@ export const settings = {
   tavily: {
     keys: Array.from({ length: 10 }, (_, i) => process.env[`TAVILY_API_KEY_${i + 1}`] || '').filter(Boolean),
   },
+  outlook: {
+    tenantId: process.env.OUTLOOK_TENANT_ID || '',
+    clientId: process.env.OUTLOOK_CLIENT_ID || '',
+    clientSecret: process.env.OUTLOOK_CLIENT_SECRET || '',
+    senderMailbox: process.env.OUTLOOK_SENDER_MAILBOX || '',
+  },
 };
 
 function validateOpenRouterKeys(): void {
@@ -71,5 +77,11 @@ export function validateLinkedInConfig(): void {
   const required = ['LINKEDIN_EMAIL', 'LINKEDIN_PASSWORD'];
   const missing = required.filter(key => !process.env[key]);
   if (missing.length > 0) throw new Error(`Missing env vars for LinkedIn: ${missing.join(', ')}`);
+}
+
+export function validateOutlookConfig(): void {
+  const required = ['OUTLOOK_TENANT_ID', 'OUTLOOK_CLIENT_ID', 'OUTLOOK_CLIENT_SECRET', 'OUTLOOK_SENDER_MAILBOX'];
+  const missing = required.filter(key => !process.env[key]);
+  if (missing.length > 0) throw new Error(`Missing env vars for Outlook newsletter: ${missing.join(', ')}. These come from an Azure AD app registration with Mail.Send application permission (admin-consented) — see src/newsletter-outlook/graphClient.ts.`);
 }
 

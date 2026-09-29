@@ -5,8 +5,12 @@ import { Page } from 'playwright';
 const ACTION_BUTTON_SELECTOR =
   'div.x1i10hfl.xjqpnuy.xc5r6h4.xqeqjp1.x1phubyo.xdl72j9.x2lah0s.x3ct3a4.xdj266r.x14z9mp.xat24cr.x1lziwak.x2lwn1j.xeuugli.x1hl2dhg.xggy1nq.x1ja2u2z.x1t137rt.x1q0g3np.x1a2a7pz.x6s0dn4.xjyslct.x1ejq31n.x18oe1m7.x1sy0etr.xstzfhl.x9f619.x1ypdohk.x1f6kntn.xl56j7k.x17ydfre.x2b8uid.xlyipyv.x87ps6o.x14atkfc.x5c86q.x18br7mf.x1i0vuye.xl0gqc1.xr5sc7.xlal1re.x14jxsvd.xt0b8zv.xjbqb8w.xr9e8f9.x1e4oeot.x1ui04y5.x6en5u8.x972fbf.x10w94by.x1qhh985.x14e42zd.xt0psk2.xt7dq6l.xexx8yu.xyri2b.x18d9i69.x1c1uobl.x1n2onr6.x1n5bzlp';
 
+// Confirmed live 2026-09-23 via real DOM: the actual aria-label is
+// "Add a caption...", not "Write a caption..." — the mismatch was why the
+// caption step timed out and the whole post aborted before ever reaching
+// Share.
 const CAPTION_SELECTOR =
-  'div[aria-label="Write a caption..."][contenteditable="true"]';
+  'div[aria-label="Add a caption..."][contenteditable="true"]';
 
 const CROP_BUTTON_SELECTOR =
   'svg[aria-label="Select crop"]';
@@ -109,7 +113,12 @@ export async function postToInstagram(
       const caption = page.locator(CAPTION_SELECTOR).first();
       await caption.waitFor({ state: 'visible', timeout: NEXT_TIMEOUT });
       await caption.click();
-      await caption.fill(description);
+      // This is a Lexical-based rich text editor (data-lexical-editor="true"),
+      // same class of editor as LinkedIn's composer — .fill() sets the DOM
+      // value directly without going through Lexical's own input handling,
+      // which can leave its internal model empty/stale. Type via the
+      // keyboard API instead, same fix already confirmed working there.
+      await page.keyboard.type(description, { delay: 10 });
       console.log('   Filled caption');
       await page.waitForTimeout(BETWEEN_CLICKS);
     }

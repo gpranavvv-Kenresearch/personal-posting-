@@ -135,12 +135,36 @@ function headingText($: cheerio.CheerioAPI, el: any): string {
   return $(el).text().trim();
 }
 
+// ChatGPT sometimes wraps the whole article body in a single top-level
+// <article>/<div>/<section> instead of flat top-level tags. Every heuristic
+// below only looks at TOP-LEVEL body children, so a single wrapper collapses
+// the entire article into one "child" — Priority 2 then matches the
+// commercial-CTA phrase buried deep inside that wrapper's text and inserts
+// the Preferred Source CTA BEFORE the whole wrapper, landing it between the
+// cover image and the H1 instead of near the article's actual end. Unwrap
+// any such single generic container (one that itself contains an h1/h2) so
+// the scoring below sees the real flat structure.
+function unwrapGenericWrappers($: cheerio.CheerioAPI, body: cheerio.Cheerio<any>): void {
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const el of body.children().toArray()) {
+      const tag = (el as any).tagName?.toLowerCase();
+      if ((tag === 'article' || tag === 'div' || tag === 'section') && $(el).find('h1, h2').length > 0) {
+        $(el).replaceWith($(el).contents());
+        changed = true;
+      }
+    }
+  }
+}
+
 export function applyPreferredSourceCTA(html: string, opts: PreferredSourceOptions): PreferredSourceResult {
   const mode = opts.mode;
   const context = extractContext(opts.title || '');
 
   const $ = cheerio.load(html);
   const body = $('body');
+  unwrapGenericWrappers($, body);
 
   // Duplication handling: remove any existing Preferred Source CTA paragraph
   // (matched by URL or "Preferred Source" text) so we always re-place it

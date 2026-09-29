@@ -51,8 +51,15 @@ const NEW_LOGIC_SHEET_NAME = 'New Logic';
 const RSS_EXTRACTION_SHEET_ID = '1p_N3zzJbUx-7t8sjuAtbQsHaUfVmYxytQU_gDd2MGwQ';
 const RSS_EXTRACTION_SHEET_NAME = 'RSS Extraction';
 
+// Newsletter campaign tab — manual input (3-4 report URLs + prospect emails
+// per row), content generated via ChatGPT, sent via Outlook. Separate from
+// the New Logic-reuse newsletter path in the "New Logic (Outlook)" section
+// further down, which sends already-generated blog content instead.
+const NEWSLETTER_CAMPAIGN_SHEET_ID = '1p_N3zzJbUx-7t8sjuAtbQsHaUfVmYxytQU_gDd2MGwQ';
+const NEWSLETTER_CAMPAIGN_SHEET_NAME = 'Newsletter';
+
 // Helper to get sheet config based on platform
-function getSheetConfig(platform?: 'social' | 'blog' | 'pool' | 'newLogic' | 'rssExtraction'): { id: string; name: string } {
+function getSheetConfig(platform?: 'social' | 'blog' | 'pool' | 'newLogic' | 'rssExtraction' | 'newsletterCampaign'): { id: string; name: string } {
   if (platform === 'blog') {
     return { id: BLOG_SHEET_ID, name: BLOG_SHEET_NAME };
   }
@@ -64,6 +71,9 @@ function getSheetConfig(platform?: 'social' | 'blog' | 'pool' | 'newLogic' | 'rs
   }
   if (platform === 'rssExtraction') {
     return { id: RSS_EXTRACTION_SHEET_ID, name: RSS_EXTRACTION_SHEET_NAME };
+  }
+  if (platform === 'newsletterCampaign') {
+    return { id: NEWSLETTER_CAMPAIGN_SHEET_ID, name: NEWSLETTER_CAMPAIGN_SHEET_NAME };
   }
   return { id: SOCIAL_SHEET_ID, name: SOCIAL_SHEET_NAME }; // default to social
 }
@@ -131,6 +141,13 @@ export interface SheetRow {
   linkedinPostUrl?: string;
   linkedinStatus?: string;
   linkedinError?: string;
+  // Instagram columns
+  instagramPost?: string;
+  instagramPostUrl?: string;
+  instagramStatus?: string;
+  instagramError?: string;
+  instagramBatch?: string;
+  lastPostedInstagram?: string;
   // Medium columns
   mediumPost?: string;
   mediumPostUrl?: string;
@@ -216,6 +233,11 @@ export interface SheetRow {
   noteError?: string;
   noteBatch?: string;
   lastPostedNote?: string;
+  vcruPostUrl?: string;
+  vcruStatus?: string;
+  vcruError?: string;
+  vcruBatch?: string;
+  lastPostedVcru?: string;
   // Naver columns
   naverPostUrl?: string;
   naverStatus?: string;
@@ -290,6 +312,7 @@ export interface SheetRow {
   pptxPath?: string;
   // Carousel / media
   imagesUrl?: string;
+  sevenSlide?: string; // "7Slide" column — local PDF path from the 7-slide storyline carousel (li-carousel-storyline/)
   // Content Pool group-batch columns
   groupAssigned?: string;   // 'Group1' | 'Group2' | 'Group3' | 'Group4' | 'Group1b' | ... (blank = unclaimed)
   claimedAt?: string;       // ISO timestamp when claimed by a group batch
@@ -482,6 +505,13 @@ function mapRow(row: string[], colMap: ColMap, rowIndex: number, sheetType: Shee
     linkedinPostUrl: g(colMap, 'LinkedIn Post URL', 'linkedin post url'),
     linkedinStatus:  g(colMap, 'LinkedIn Status', 'linkedin status'),
     linkedinError:   g(colMap, 'LinkedIn Error', 'linkedin error'),
+    // Instagram columns
+    instagramPost:    g(colMap, 'Instagram Post', 'instagram post'),
+    instagramPostUrl: g(colMap, 'Instagram Post URL', 'instagram post url'),
+    instagramStatus:  g(colMap, 'Instagram Status', 'instagram status'),
+    instagramError:   g(colMap, 'Instagram Error', 'instagram error'),
+    instagramBatch:   g(colMap, 'instagramBatch', 'instagram batch', 'Instagram Batch'),
+    lastPostedInstagram: g(colMap, 'lastPostedInstagram', 'lastpostedinstagram'),
     // Medium columns
     mediumPost:      g(colMap, 'Medium Post', 'medium post'),
     mediumPostUrl:   g(colMap, 'Medium Post URL', 'medium post url'),
@@ -562,6 +592,12 @@ function mapRow(row: string[], colMap: ColMap, rowIndex: number, sheetType: Shee
     noteError:   g(colMap, 'Note Error', 'note error'),
     noteBatch:   g(colMap, 'noteBatch', 'note batch', 'Note Batch'),
     lastPostedNote: g(colMap, 'Last Posted Note', 'lastPostedNote', 'lastpostednote'),
+    // vc.ru columns
+    vcruPostUrl: g(colMap, 'Vcru Post URL', 'vcru post url'),
+    vcruStatus:  g(colMap, 'Vcru Status', 'vcru status'),
+    vcruError:   g(colMap, 'Vcru Error', 'vcru error'),
+    vcruBatch:   g(colMap, 'vcruBatch', 'vcru batch', 'Vcru Batch'),
+    lastPostedVcru: g(colMap, 'Last Posted Vcru', 'lastPostedVcru', 'lastpostedvcru'),
     // Naver columns
     naverPostUrl: g(colMap, 'Naver Post URL', 'naver post url'),
     naverStatus:  g(colMap, 'Naver Status', 'naver status'),
@@ -635,6 +671,7 @@ function mapRow(row: string[], colMap: ColMap, rowIndex: number, sheetType: Shee
     pdfPath:   g(colMap, 'PDF Path', 'pdf path', 'pdfPath'),
     pptxPath:  g(colMap, 'PPTX Path', 'pptx path', 'pptxPath'),
     imagesUrl: g(colMap, 'Images URL', 'images url', 'Image URL', 'image url'),
+    sevenSlide: g(colMap, '7Slide', '7slide'),
     // Content Pool group-batch columns
     groupAssigned:   g(colMap, 'Group Assigned', 'group assigned'),
     claimedAt:       g(colMap, 'Claimed At', 'claimed at'),
@@ -858,19 +895,30 @@ export async function getContentPoolRowsNeedingGeneration(limit: number = 3, she
 
 export async function saveGeneratedBlogToPool(
   row: { rowIndex: number },
-  result: { coverImageUrl?: string; html: string },
+  result: { coverImageUrl?: string; html: string; seoTitle?: string; metaDescription?: string; imageData?: string; imageData2?: string },
   sheetType: 'pool' | 'newLogic' = 'pool'
 ): Promise<void> {
   const sheets = await getSheetsClient();
   const sheetConfig = getSheetConfig(sheetType);
   const colMap = await getColumnMap(sheets, sheetConfig.id, sheetConfig.name);
 
-  // Only Blog Content and Cover Image URL — Title/Description/Blog Caption
-  // are not touched by blog generation.
+  // Blog Content + Cover Image URL, plus (since the V1.3 master prompt,
+  // 2026-09-18) the SEO Title / Meta Description / Key Snapshot Metrics the
+  // same ChatGPT reply already returns — written into New Logic's existing
+  // "Title" (C) / "Description" (D) / "Image Data" (E) columns.
+  // "Image Data 2" (Growth Drivers / Competitive Landscape / Regional
+  // Landscape, feeding the second mid-blog image — see
+  // blogLandscapeImageAgent.ts) is a NEW column; buildUpdates() logs a
+  // warning and skips it harmlessly until that column is added to the New
+  // Logic sheet.
   const fields: { names: string[]; value: string }[] = [
     { names: ['Blog Content', 'blog content'], value: result.html },
   ];
   if (result.coverImageUrl) fields.push({ names: ['Cover Image URL', 'cover image url'], value: result.coverImageUrl });
+  if (result.seoTitle) fields.push({ names: ['Title', 'title'], value: result.seoTitle });
+  if (result.metaDescription) fields.push({ names: ['Description', 'description'], value: result.metaDescription });
+  if (result.imageData) fields.push({ names: ['Image Data', 'image data'], value: result.imageData });
+  if (result.imageData2) fields.push({ names: ['Image Data 2', 'image data 2'], value: result.imageData2 });
 
   const data = buildUpdates(colMap, row.rowIndex, fields, sheetConfig.name);
   await batchWrite(sheets, data, sheetConfig.id);
@@ -2046,11 +2094,17 @@ export async function getRowsNeedingSocialSlot(slot: 1 | 2, limit: number): Prom
   return results;
 }
 
-/** Rows eligible for the LinkedIn image-post flow: "Images URL" (col E) has
- *  a local path, but "LinkedinCrousel" (col F) is still empty — i.e. an
- *  image was generated for this row but not yet posted as a carousel image.
- *  LinkedinCrousel getting filled on success is itself the completion
- *  marker, so a row never gets re-picked once it's actually posted. */
+/** Rows eligible for the LinkedIn image-post flow: "7Slide" (col H, the
+ *  7-slide storyline carousel PDF path) has a local path, but "LinkedIn
+ *  Status" (LinkedIn's own dedicated column, same one savePlatformColumnResult
+ *  writes for every LI post whether image or text) is still empty — i.e. a
+ *  carousel PDF was generated for this row but LinkedIn hasn't been posted
+ *  to yet at all. "LinkedIn Status" getting filled on success (or failure)
+ *  is itself the completion marker, so a row never gets re-picked.
+ *  (Was "Images URL" + "LinkedinCrousel"-driven before 2026-09-22 — switched
+ *  to "7Slide" + "LinkedIn Status" per explicit instruction, so the image
+ *  and text LI flows share one dedicated completion marker; X's own image
+ *  posting still uses "Images URL", untouched.) */
 export async function getRowsNeedingLinkedinImagePost(limit: number): Promise<SheetRow[]> {
   const sheets = await getSheetsClient();
   const colMap = await getColumnMap(sheets);
@@ -2062,11 +2116,11 @@ export async function getRowsNeedingLinkedinImagePost(limit: number): Promise<Sh
 
   const titleIdx = col(colMap, 'Title', 'title') ?? -1;
   const targetUrlIdx = col(colMap, 'Target URL', 'target url', 'targetUrl', 'URL', 'url') ?? -1;
-  const imagesUrlIdx = col(colMap, 'Images URL', 'images url', 'Image URL', 'image url') ?? -1;
-  const carouselIdx = col(colMap, 'LinkedinCrousel', 'linkedincrousel', 'LinkedinCarousel', 'linkedincarousel') ?? -1;
+  const sevenSlideIdx = col(colMap, '7Slide', '7slide') ?? -1;
+  const carouselIdx = col(colMap, 'LinkedIn Status', 'linkedin status') ?? -1;
 
-  if (imagesUrlIdx === -1 || carouselIdx === -1) {
-    console.warn('   ⚠️ [LI Image] "Images URL" or "LinkedinCrousel" column not found — cannot pick rows.');
+  if (sevenSlideIdx === -1 || carouselIdx === -1) {
+    console.warn('   ⚠️ [LI Image] "7Slide" or "LinkedIn Status" column not found — cannot pick rows.');
     return [];
   }
 
@@ -2075,7 +2129,7 @@ export async function getRowsNeedingLinkedinImagePost(limit: number): Promise<Sh
     const row = rows[i];
     const title = titleIdx >= 0 ? (row[titleIdx] ?? '').trim() : '';
     const targetUrl = targetUrlIdx >= 0 ? (row[targetUrlIdx] ?? '').trim() : '';
-    const imagePath = (row[imagesUrlIdx] ?? '').trim();
+    const imagePath = (row[sevenSlideIdx] ?? '').trim();
     const carouselFilled = (row[carouselIdx] ?? '').trim();
     if (!title || !targetUrl || !imagePath || carouselFilled) continue;
     results.push(mapRow(row, colMap, i + 1, 'social'));
@@ -2105,6 +2159,112 @@ export async function saveSocialSlotResult(
     fields.push({ names: [`Social Platform ${slot}`], value: platformDisplayName });
     fields.push({ names: [`Social URL ${slot}`], value: result.url });
     fields.push({ names: [`Last Posted Social Platform ${slot}`], value: today });
+  }
+
+  const data = buildUpdates(colMap, rowIndex, fields, SHEET_NAME);
+  await batchWrite(sheets, data, SHEET_ID);
+}
+
+// ──── Social Media: dedicated per-platform columns ─────────────────────────
+// X / Facebook / Instapaper / Tumblr / Raindrop / Pearltrees / LinkedIn each
+// own their full column set (lastPosted<Platform> / <platform>Batch /
+// <Platform> Post / <Platform> Post URL / <Platform> Status / <Platform>
+// Error) — the pattern this project originally used (see the "Previous
+// Socila media" tab) before it was consolidated into the shared
+// "Social Platform 1/2" slot system above. Added back 2026-09-22 as an
+// independent, parallel picking system — the shared-slot functions
+// (getRowsNeedingSocialSlot / saveSocialSlotResult) are kept as-is, not
+// removed, for possible future reuse.
+//
+// Picking rule: a row is eligible for a platform once its own <Platform>
+// Status cell is empty. Any non-empty status (Posted, Failed, Error, or
+// anything else) means that platform already ran on this row — skip it,
+// the next row with an empty status for that platform is picked instead.
+
+interface PlatformColumnSet {
+  lastPosted: string;
+  batch: string;
+  post: string;
+  url: string;
+  status: string;
+  error: string;
+}
+
+const PLATFORM_COLUMNS = {
+  X:          { lastPosted: 'lastPostedX',         batch: 'xBatch',          post: 'X Post',          url: 'X Post URL',          status: 'X Status',          error: 'X Error' },
+  Facebook:   { lastPosted: 'lastPostedFb',         batch: 'fbBatch',         post: 'FB Post',         url: 'FB Post URL',         status: 'FB Status',         error: 'FB Error' },
+  Instapaper: { lastPosted: 'lastPostedInstapaper', batch: 'instapaperBatch', post: 'Instapaper Post', url: 'Instapaper Post URL', status: 'Instapaper Status', error: 'Instapaper Error' },
+  Tumblr:     { lastPosted: 'lastPostedTumblr',     batch: 'tumblrBatch',     post: 'Tumblr Post',     url: 'Tumblr Post URL',     status: 'Tumblr Status',     error: 'Tumblr Error' },
+  Raindrop:   { lastPosted: 'lastPostedRaindrop',   batch: 'raindropBatch',   post: 'Raindrop Post',   url: 'Raindrop Post URL',   status: 'Raindrop Status',   error: 'Raindrop Error' },
+  Pearltrees: { lastPosted: 'lastPostedPearltrees', batch: 'pearltreesBatch', post: 'Pearltrees Post', url: 'Pearltrees Post URL', status: 'Pearltrees Status', error: 'Pearltrees Error' },
+  LinkedIn:   { lastPosted: 'lastPostedLi',         batch: 'liBatch',         post: 'LinkedIn Post',   url: 'LinkedIn Post URL',   status: 'LinkedIn Status',   error: 'LinkedIn Error' },
+  Instagram:  { lastPosted: 'lastPostedInstagram',  batch: 'instagramBatch',  post: 'Instagram Post',  url: 'Instagram Post URL',  status: 'Instagram Status',  error: 'Instagram Error' },
+} satisfies Record<string, PlatformColumnSet>;
+
+export type PlatformColumnName = keyof typeof PLATFORM_COLUMNS;
+
+export async function getRowsNeedingPlatformColumn(platform: PlatformColumnName, limit: number): Promise<SheetRow[]> {
+  const cols = PLATFORM_COLUMNS[platform];
+  const sheets = await getSheetsClient();
+  const colMap = await getColumnMap(sheets);
+
+  const res = await withRetry(() => sheets.spreadsheets.values.get({
+    spreadsheetId: SHEET_ID, range: `${SHEET_NAME}!A:BZ`,
+  }), `getRowsNeedingPlatformColumn_${platform}`);
+  const rows: string[][] = res.data.values ?? [];
+
+  const titleIdx = col(colMap, 'Title', 'title') ?? -1;
+  const targetUrlIdx = col(colMap, 'Target URL', 'target url', 'targetUrl', 'URL', 'url') ?? -1;
+  const statusIdx = col(colMap, cols.status) ?? -1;
+
+  if (statusIdx === -1) {
+    console.warn(`   ⚠️ [${platform} Column] "${cols.status}" column not found — cannot pick rows.`);
+    return [];
+  }
+
+  const results: SheetRow[] = [];
+  for (let i = 1; i < rows.length && results.length < limit; i++) {
+    const row = rows[i];
+    const title = titleIdx >= 0 ? (row[titleIdx] ?? '').trim() : '';
+    const targetUrl = targetUrlIdx >= 0 ? (row[targetUrlIdx] ?? '').trim() : '';
+    const statusFilled = (row[statusIdx] ?? '').trim();
+    if (!title || !targetUrl || statusFilled) continue;
+    results.push(mapRow(row, colMap, i + 1, 'social'));
+  }
+
+  console.log(`   📄 [${platform} Column] found ${results.length} row(s) ready`);
+  return results;
+}
+
+/** Write one platform's post result into its own dedicated columns —
+ *  Post (generated content), Post URL, Status, Error, Batch, lastPosted.
+ *  Only writes the URL/lastPosted on success — a failed row stays without a
+ *  URL so it's visibly distinct, but its Status is still filled (non-empty),
+ *  so it will NOT be re-picked (matches the "skip if Status filled" rule
+ *  regardless of success/failure). `post` (the generated content) is written
+ *  whenever supplied, regardless of success/failure, since it's useful for
+ *  debugging a failed post too. */
+export async function savePlatformColumnResult(
+  rowIndex: number,
+  platform: PlatformColumnName,
+  result: { url: string; status: string; error?: string; batch?: string; post?: string }
+): Promise<void> {
+  const cols = PLATFORM_COLUMNS[platform];
+  const sheets = await getSheetsClient();
+  const colMap = await getColumnMap(sheets);
+  const today = new Date().toISOString().split('T')[0];
+
+  const fields: { names: string[]; value: string }[] = [
+    { names: [cols.status], value: result.status ?? '' },
+    { names: [cols.batch], value: result.batch ?? '' },
+    { names: [cols.error], value: result.error ?? '' },
+  ];
+  if (result.post !== undefined) {
+    fields.push({ names: [cols.post], value: result.post });
+  }
+  if (result.status?.toLowerCase() === 'posted') {
+    fields.push({ names: [cols.url], value: result.url });
+    fields.push({ names: [cols.lastPosted], value: today });
   }
 
   const data = buildUpdates(colMap, rowIndex, fields, SHEET_NAME);
@@ -3572,6 +3732,16 @@ export async function getRowsForContinuousHackmdPosting(limit: number = 15): Pro
   return getRowsNeedingSlot(3, limit);
 }
 
+// Telegraph is a long-form blog platform, not a social-media one — it was
+// previously wired to the Social Media tab's slot system (short-form
+// content, real blog HTML usually absent), which meant it almost always
+// fell back to a minimal stub instead of an actual article. Moved to New
+// Logic Slot 3 (shares it with Dev.to/WordPress/HackMD/4shared) so it
+// posts the same full blogContent the other blog platforms do.
+export async function getRowsForContinuousTelegraphPosting(limit: number = 15): Promise<SheetRow[]> {
+  return getRowsNeedingSlot(3, limit);
+}
+
 export async function saveUnifiedWordpressResult(
   row: SheetRow,
   result: { postUrl: string; status: string; error?: string; batch?: string }
@@ -3758,7 +3928,7 @@ export async function saveUnifiedNotionResult(
 // ──── Note Blog Posting ────────────────────────────────────────────────────────
 
 export async function getRowsForContinuousNotePosting(limit: number = 15): Promise<SheetRow[]> {
-  return pickRowsByEmptyStatus(['Note Status', 'note status', 'NoteStatus'], 'Note', limit);
+  return pickRowsByEmptyStatus(['Note Status', 'note status', 'NoteStatus'], 'Note', limit, 'newLogic');
 }
 
 export async function saveUnifiedNoteResult(
@@ -3779,6 +3949,34 @@ export async function saveUnifiedNoteResult(
     { names: ['Note Error', 'note error'], value: result.error ?? '' },
     { names: ['noteBatch', 'note batch', 'Note Batch'], value: result.batch ?? '' },
     { names: ['Last Posted Note', 'lastPostedNote', 'lastpostednote'], value: newLastPosted },
+  ], sheetConfig.name);
+  await batchWrite(sheets, data, sheetConfig.id);
+}
+
+// ──── vc.ru Blog Posting ───────────────────────────────────────────────────────
+
+export async function getRowsForContinuousVcruPosting(limit: number = 15): Promise<SheetRow[]> {
+  return pickRowsByEmptyStatus(['Vcru Status', 'vcru status', 'VcruStatus'], 'Vcru', limit, 'newLogic');
+}
+
+export async function saveUnifiedVcruResult(
+  row: SheetRow,
+  result: { postUrl: string; status: string; error?: string; batch?: string }
+): Promise<void> {
+  const sheets = await getSheetsClient();
+  const sheetConfig = getSheetConfig(row.sheetType ?? 'blog');
+  const colMap = await getColumnMap(sheets, sheetConfig.id, sheetConfig.name);
+  const today = new Date().toISOString().split('T')[0];
+  const newUrl = appendValue(row.vcruPostUrl, result.postUrl);
+  const newLastPosted = result.status?.toLowerCase() === 'posted'
+    ? appendValue(row.lastPostedVcru, today)
+    : (row.lastPostedVcru ?? '');
+  const data = buildUpdates(colMap, row.rowIndex, [
+    { names: ['Vcru Post URL', 'vcru post url'], value: newUrl },
+    { names: ['Vcru Status', 'vcru status'], value: result.status },
+    { names: ['Vcru Error', 'vcru error'], value: result.error ?? '' },
+    { names: ['vcruBatch', 'vcru batch', 'Vcru Batch'], value: result.batch ?? '' },
+    { names: ['Last Posted Vcru', 'lastPostedVcru', 'lastpostedvcru'], value: newLastPosted },
   ], sheetConfig.name);
   await batchWrite(sheets, data, sheetConfig.id);
 }
@@ -3993,6 +4191,15 @@ export async function saveUnifiedFourSharedResult(
   await batchWrite(sheets, data, sheetConfig.id);
 }
 
+// ──── Tistory Posting ───────────────────────────────────────────────────────────
+// Tistory shares slot 3 of the New Logic 3-slot system with HackMD,
+// WordPress, and Dev.to — same row pool, same "Blog Platform 3"/"Blog
+// URL 3" shared columns, written via saveSlotResult() (not its own
+// dedicated Tistory Status/Post URL columns).
+export async function getRowsForContinuousTistoryPosting(limit: number = 15): Promise<SheetRow[]> {
+  return getRowsNeedingSlot(3, limit);
+}
+
 // ──── Mastodon Posting ──────────────────────────────────────────────────────────
 
 export async function getRowsForContinuousMastodonPosting(limit: number = 15): Promise<SheetRow[]> {
@@ -4116,6 +4323,15 @@ export async function saveUnifiedParagraphResult(
   await batchWrite(sheets, data, sheetConfig.id);
 }
 
+// ── Mataroa ───────────────────────────────────────────────────────────────────
+// Pure REST API (no browser) — see browser/mataroa/apiPoster.ts.
+// Shares New Logic Slot 1 ("Blog Platform 1"/"Blog URL 1") with Linkmate,
+// Blogger, Coda, Medium and Velog — see getRowsNeedingSlot / saveSlotResult.
+
+export async function getRowsForContinuousMataroaPosting(limit: number = 15): Promise<SheetRow[]> {
+  return getRowsNeedingSlot(1, limit);
+}
+
 // ──── New Logic: slot result writer ────────────────────────────────────────
 // Each of the 9 platforms is permanently assigned to exactly one slot (1/2/3).
 // A row's slot columns (Blog Platform N / Blog URL N) are only ever written
@@ -4187,4 +4403,199 @@ export async function saveSlotResult(
 
   const data = buildUpdates(colMap, rowIndex, fields, sheetConfig.name);
   await batchWrite(sheets, data, sheetConfig.id);
+}
+
+// ──── Newsletter (Outlook) ──────────────────────────────────────────────────
+// Independent status column, like Note/Naver/Velog — not part of the 9-platform
+// shared blog slot system, since it's a separate channel (email, not a blog post).
+
+export async function getRowsForContinuousNewsletterPosting(limit: number = 15): Promise<SheetRow[]> {
+  return pickRowsByEmptyStatus(['Newsletter Status', 'newsletter status', 'NewsletterStatus'], 'Newsletter', limit, 'newLogic');
+}
+
+export async function ensureNewsletterColumns(): Promise<void> {
+  return ensureSheetColumns('newLogic', [
+    'Newsletter Status', 'Newsletter Error', 'Newsletter Batch', 'Newsletter Recipients Sent', 'Last Posted Newsletter',
+  ]);
+}
+
+export async function saveUnifiedNewsletterResult(
+  row: SheetRow,
+  result: { status: string; error?: string; batch?: string; recipientsSent?: number }
+): Promise<void> {
+  const sheets = await getSheetsClient();
+  const sheetConfig = getSheetConfig(row.sheetType ?? 'newLogic');
+  const colMap = await getColumnMap(sheets, sheetConfig.id, sheetConfig.name);
+  const today = new Date().toISOString().split('T')[0];
+  const data = buildUpdates(colMap, row.rowIndex, [
+    { names: ['Newsletter Status', 'newsletter status'], value: result.status },
+    { names: ['Newsletter Error', 'newsletter error'], value: result.error ?? '' },
+    { names: ['Newsletter Batch', 'newsletter batch'], value: result.batch ?? '' },
+    { names: ['Newsletter Recipients Sent', 'newsletter recipients sent'], value: String(result.recipientsSent ?? 0) },
+    { names: ['Last Posted Newsletter', 'lastPostedNewsletter', 'lastpostednewsletter'], value: result.status?.toLowerCase() === 'posted' ? today : '' },
+  ], sheetConfig.name);
+  await batchWrite(sheets, data, sheetConfig.id);
+}
+
+// ──── Newsletter Campaign tab ("Newsletter") ────────────────────────────────
+// Manual-input pipeline: you drop 3-4 report URLs + a list of prospect
+// emails into a row; ChatGPT generates the newsletter content from those
+// URLs; the generated content is stored back on the row; then it's sent to
+// exactly the emails listed on that row. Independent of the New Logic-reuse
+// newsletter path above — this tab is its own campaign queue, not tied to
+// the 9-platform blog pipeline.
+
+const NEWSLETTER_CAMPAIGN_HEADERS = [
+  'Report URL 1', 'Report URL 2', 'Report URL 3', 'Report URL 4',
+  'Prospect Emails', 'Generated Subject', 'Generated Content',
+  'Status', 'Error', 'Batch', 'Recipients Sent', 'Sent At',
+];
+
+export interface NewsletterCampaignRow {
+  rowIndex: number; // 1-based sheet row
+  reportUrls: string[];
+  prospectEmailsRaw: string;
+  generatedSubject: string;
+  generatedContent: string;
+}
+
+/** Creates the "Newsletter" tab with its header row if it doesn't exist yet. Safe to call repeatedly. */
+async function ensureNewsletterCampaignSheet(sheets: any): Promise<void> {
+  const cfg = getSheetConfig('newsletterCampaign');
+  const meta = await withRetry(() => sheets.spreadsheets.get({
+    spreadsheetId: cfg.id,
+    fields: 'sheets(properties(sheetId,title))',
+  }), 'ensureNewsletterCampaignSheet:meta');
+
+  const exists = meta.data.sheets?.some((s: any) => s.properties?.title === cfg.name);
+  if (exists) return;
+
+  console.log(`   📐 Creating "${cfg.name}" tab...`);
+  await withRetry(() => sheets.spreadsheets.batchUpdate({
+    spreadsheetId: cfg.id,
+    requestBody: { requests: [{ addSheet: { properties: { title: cfg.name } } }] },
+  }), 'ensureNewsletterCampaignSheet:addSheet');
+
+  await withRetry(() => sheets.spreadsheets.values.update({
+    spreadsheetId: cfg.id,
+    range: `${cfg.name}!A1`,
+    valueInputOption: 'RAW',
+    requestBody: { values: [NEWSLETTER_CAMPAIGN_HEADERS] },
+  }), 'ensureNewsletterCampaignSheet:headers');
+  console.log(`   ✅ "${cfg.name}" tab created with header row.`);
+}
+
+/** One-time setup: creates the "Newsletter" tab now, without needing a row to trigger it. Safe to call repeatedly. */
+export async function createNewsletterCampaignTabIfMissing(): Promise<void> {
+  const sheets = await getSheetsClient();
+  await ensureNewsletterCampaignSheet(sheets);
+}
+
+/** Rows with at least Report URL 1 filled in but no Generated Content yet — ready for ChatGPT generation. */
+export async function getNewsletterCampaignRowsNeedingGeneration(limit: number = 5): Promise<NewsletterCampaignRow[]> {
+  const sheets = await getSheetsClient();
+  const cfg = getSheetConfig('newsletterCampaign');
+  await ensureNewsletterCampaignSheet(sheets);
+  const colMap = await getColumnMap(sheets, cfg.id, cfg.name);
+
+  const url1Idx = col(colMap, 'Report URL 1', 'report url 1');
+  const url2Idx = col(colMap, 'Report URL 2', 'report url 2');
+  const url3Idx = col(colMap, 'Report URL 3', 'report url 3');
+  const url4Idx = col(colMap, 'Report URL 4', 'report url 4');
+  const emailsIdx = col(colMap, 'Prospect Emails', 'prospect emails');
+  const subjectIdx = col(colMap, 'Generated Subject', 'generated subject');
+  const contentIdx = col(colMap, 'Generated Content', 'generated content');
+  if (url1Idx === undefined || contentIdx === undefined) return [];
+
+  const res = await withRetry(() => sheets.spreadsheets.values.get({
+    spreadsheetId: cfg.id, range: `${cfg.name}!A:Z`,
+  }), 'getNewsletterCampaignRowsNeedingGeneration');
+  const rows: string[][] = res.data.values ?? [];
+
+  const out: NewsletterCampaignRow[] = [];
+  for (let i = 1; i < rows.length && out.length < limit; i++) {
+    const r = rows[i];
+    const url1 = (r[url1Idx] ?? '').trim();
+    const content = (r[contentIdx] ?? '').trim();
+    if (!url1 || content) continue;
+    out.push({
+      rowIndex: i + 1,
+      reportUrls: [url1, r[url2Idx!], r[url3Idx!], r[url4Idx!]].map(u => (u ?? '').trim()).filter(Boolean),
+      prospectEmailsRaw: emailsIdx !== undefined ? (r[emailsIdx] ?? '').trim() : '',
+      generatedSubject: subjectIdx !== undefined ? (r[subjectIdx] ?? '').trim() : '',
+      generatedContent: content,
+    });
+  }
+  return out;
+}
+
+export async function saveNewsletterCampaignGeneratedContent(
+  rowIndex: number,
+  result: { subject: string; content: string }
+): Promise<void> {
+  const sheets = await getSheetsClient();
+  const cfg = getSheetConfig('newsletterCampaign');
+  const colMap = await getColumnMap(sheets, cfg.id, cfg.name);
+  const data = buildUpdates(colMap, rowIndex, [
+    { names: ['Generated Subject', 'generated subject'], value: result.subject },
+    { names: ['Generated Content', 'generated content'], value: result.content },
+  ], cfg.name);
+  await batchWrite(sheets, data, cfg.id);
+}
+
+/** Rows with Generated Content filled in but no Status yet — ready to send. */
+export async function getNewsletterCampaignRowsReadyToSend(limit: number = 5): Promise<NewsletterCampaignRow[]> {
+  const sheets = await getSheetsClient();
+  const cfg = getSheetConfig('newsletterCampaign');
+  await ensureNewsletterCampaignSheet(sheets);
+  const colMap = await getColumnMap(sheets, cfg.id, cfg.name);
+
+  const url1Idx = col(colMap, 'Report URL 1', 'report url 1');
+  const url2Idx = col(colMap, 'Report URL 2', 'report url 2');
+  const url3Idx = col(colMap, 'Report URL 3', 'report url 3');
+  const url4Idx = col(colMap, 'Report URL 4', 'report url 4');
+  const emailsIdx = col(colMap, 'Prospect Emails', 'prospect emails');
+  const subjectIdx = col(colMap, 'Generated Subject', 'generated subject');
+  const contentIdx = col(colMap, 'Generated Content', 'generated content');
+  const statusIdx = col(colMap, 'Status', 'status');
+  if (contentIdx === undefined) return [];
+
+  const res = await withRetry(() => sheets.spreadsheets.values.get({
+    spreadsheetId: cfg.id, range: `${cfg.name}!A:Z`,
+  }), 'getNewsletterCampaignRowsReadyToSend');
+  const rows: string[][] = res.data.values ?? [];
+
+  const out: NewsletterCampaignRow[] = [];
+  for (let i = 1; i < rows.length && out.length < limit; i++) {
+    const r = rows[i];
+    const content = (r[contentIdx] ?? '').trim();
+    const status = statusIdx !== undefined ? (r[statusIdx] ?? '').trim() : '';
+    if (!content || status) continue;
+    out.push({
+      rowIndex: i + 1,
+      reportUrls: [r[url1Idx!], r[url2Idx!], r[url3Idx!], r[url4Idx!]].map(u => (u ?? '').trim()).filter(Boolean),
+      prospectEmailsRaw: emailsIdx !== undefined ? (r[emailsIdx] ?? '').trim() : '',
+      generatedSubject: subjectIdx !== undefined ? (r[subjectIdx] ?? '').trim() : '',
+      generatedContent: content,
+    });
+  }
+  return out;
+}
+
+export async function saveNewsletterCampaignSendResult(
+  rowIndex: number,
+  result: { status: string; error?: string; batch?: string; recipientsSent?: number }
+): Promise<void> {
+  const sheets = await getSheetsClient();
+  const cfg = getSheetConfig('newsletterCampaign');
+  const colMap = await getColumnMap(sheets, cfg.id, cfg.name);
+  const now = new Date().toISOString();
+  const data = buildUpdates(colMap, rowIndex, [
+    { names: ['Status', 'status'], value: result.status },
+    { names: ['Error', 'error'], value: result.error ?? '' },
+    { names: ['Batch', 'batch'], value: result.batch ?? '' },
+    { names: ['Recipients Sent', 'recipients sent'], value: String(result.recipientsSent ?? 0) },
+    { names: ['Sent At', 'sent at'], value: result.status?.toLowerCase() === 'posted' ? now : '' },
+  ], cfg.name);
+  await batchWrite(sheets, data, cfg.id);
 }

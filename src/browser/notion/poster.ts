@@ -1,5 +1,6 @@
 import { Page } from 'playwright';
 import { injectUTM, UTM_PARAMS } from '../../utils/utm.js';
+import { gotoWithHardRefreshRetry } from './login.js';
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
@@ -22,21 +23,21 @@ export async function postToNotion(
 ): Promise<{ success: true; postUrl: string; postedAt: Date }> {
   htmlContent = injectUTM(htmlContent, UTM_PARAMS.Notion);
 
-  // Maximize window
-  try {
-    const cdp = await page.context().newCDPSession(page);
-    const { windowId } = await cdp.send('Browser.getWindowForTarget');
-    await cdp.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'maximized' } });
-    await cdp.detach().catch(() => {});
-  } catch { /* ignore */ }
+  // Notion's editor needs a real, full-size viewport to interact with
+  // reliably — but that does NOT require restoring/maximizing the actual OS
+  // window. setViewportSize() resizes Chromium's internal render surface
+  // only; the window itself stays minimized in the taskbar the whole time
+  // (confirmed live 2026-09-20: the old CDP "maximized" call here was
+  // exactly what popped the window open mid-post).
+  await page.setViewportSize({ width: 1400, height: 900 }).catch(() => {});
 
   // Step 1: Navigate directly to a fresh blank page — skips the old
   // "New page" button + "Page" type popup + URL-slug-confirmation retry
   // loop entirely.
   console.log('   Navigating to app.notion.com/new...');
   try {
-    await page.goto('https://app.notion.com/new', { waitUntil: 'domcontentloaded', timeout: 30000 });
-  } catch { /* timeout ok */ }
+    await gotoWithHardRefreshRetry(page, 'https://app.notion.com/new');
+  } catch { /* timeout ok — the retry helper already tried 3x */ }
   const initialWait = 5000;
   console.log(`   Waiting ${Math.round(initialWait / 1000)}s for Notion to settle...`);
   await sleep(initialWait);

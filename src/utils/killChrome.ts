@@ -25,9 +25,19 @@ export async function killChromeForProfile(sessionDir: string): Promise<void> {
     // Get-CimInstance (WinRM/DCOM-free) is markedly faster than the legacy
     // Get-WmiObject — this runs before every login across 45+ accounts, so the
     // per-call cost matters.
+    // Confirmed live 2026-09-24: doubling backslashes here was wrong for a
+    // single-quoted PowerShell string — backslash isn't an escape character
+    // there (or in -like's wildcard syntax), so the doubled pattern (e.g.
+    // "C:\\Users\\...") could never match Chrome's real single-backslash
+    // command line ("C:\Users\..."). This silently no-op'd the kill on every
+    // call, every profile, leaving stale Chrome processes holding the
+    // profile lock for the next launch to collide with ("Opening in
+    // existing browser session" / "Target page ... has been closed"). Only
+    // single quotes themselves need escaping in a PowerShell single-quoted
+    // string, by doubling them.
     const script = `
       $procs = Get-CimInstance Win32_Process -Filter "Name='chrome.exe'" -ErrorAction SilentlyContinue
-      $matched = @($procs | Where-Object { $_.CommandLine -and $_.CommandLine -like '*${absDir.replace(/\\/g, '\\\\')}*' })
+      $matched = @($procs | Where-Object { $_.CommandLine -and $_.CommandLine -like '*${absDir.replace(/'/g, "''")}*' })
       foreach ($p in $matched) {
         Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
       }

@@ -30,5 +30,14 @@ li-carousel/.auth/
 li-carousel/.env
 li-carousel/images/
 li-carousel/briefs/
+
+# li-carousel-storyline is another self-contained sub-project with the same
+# shape — keep its source (scripts, prompts), never its generated output.
+li-carousel-storyline/images/
+li-carousel-storyline/runs/
+
+# Not part of this project's source — a standalone keep-awake helper script.
+scripts/
+
 __pycache__/
 *.pyc

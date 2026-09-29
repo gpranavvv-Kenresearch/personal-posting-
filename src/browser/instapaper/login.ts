@@ -144,7 +144,10 @@ export async function loginToInstapaper(options?: { nickname?: string }): Promis
       await page.keyboard.type(account.password, { delay: 80 });
       await sleep(300);
 
-      const submitBtn = page.locator('input[type="submit"], button[type="submit"]').first();
+      // #log_in is the real button id confirmed live 2026-09-20 — put it
+      // first so it's always tried explicitly, not just matched incidentally
+      // by the generic type="submit" selector.
+      const submitBtn = page.locator('#log_in, input[type="submit"], button[type="submit"]').first();
       if (await submitBtn.isVisible({ timeout: 3000 }).catch(() => false)) {
         await submitBtn.click();
       } else {
@@ -157,6 +160,18 @@ export async function loginToInstapaper(options?: { nickname?: string }): Promis
     }
   } else {
     console.log('   👉 Please log in manually in the browser window.\n');
+  }
+
+  if (!(await isLoggedIn(page))) {
+    // Explicit fallback: click the confirmed #log_in button directly, in
+    // case the fill/submit block above was skipped entirely (no stored
+    // password) or its click didn't register.
+    const logInBtn = page.locator('#log_in').first();
+    if (await logInBtn.isVisible({ timeout: 2000 }).catch(() => false)) {
+      console.log('   Trying explicit #log_in button click...');
+      await logInBtn.click().catch(() => {});
+      await sleep(2000);
+    }
   }
 
   if (!(await isLoggedIn(page))) {

@@ -14,23 +14,36 @@ const clickDelay = () => sleep(1500 + Math.floor(Math.random() * 500));
 // the browser's click handling (and React's delegated listeners) without
 // any coordinate/occlusion/viewport check at all.
 //
-// A selector can also match more than one element (e.g. a duplicate button
-// rendered for a mobile nav, hidden off-screen) — .first() isn't
+// A selector can also match more than one element (e.g. a duplicate sticky
+// header rendered during scroll/resize transitions) — .first() isn't
 // necessarily the one actually on screen, so pick the first VISIBLE match.
+// isVisible() is a single point-in-time snapshot: at a small viewport height
+// (confirmed live — 609px instead of the intended 900px) Velog briefly
+// renders a duplicate header mid-transition, so a one-shot check can catch
+// both copies as not-yet-visible. Poll for up to ~4s instead of failing on
+// the first snapshot.
 async function clickBySelector(page: Page, selector: string): Promise<void> {
   const locator = page.locator(selector);
   await locator.first().waitFor({ state: 'attached', timeout: 15000 });
-  const count = await locator.count();
 
-  for (let i = 0; i < count; i++) {
-    const candidate = locator.nth(i);
-    const visible = await candidate.isVisible().catch(() => false);
-    if (!visible) continue;
-    await candidate.evaluate((el: HTMLElement) => el.click());
-    return;
+  const deadline = Date.now() + 4000;
+  let lastCount = 0;
+  while (Date.now() < deadline) {
+    const count = await locator.count();
+    lastCount = count;
+    for (let i = 0; i < count; i++) {
+      const candidate = locator.nth(i);
+      const visible = await candidate.isVisible().catch(() => false);
+      if (!visible) continue;
+      const box = await candidate.boundingBox().catch(() => null);
+      if (!box || box.y < 0) continue; // off-screen (e.g. sticky header clone translated above the viewport)
+      await candidate.evaluate((el: HTMLElement) => el.click());
+      return;
+    }
+    await sleep(300);
   }
 
-  throw new Error(`Found ${count} match(es) for "${selector}" but none were visible on screen`);
+  throw new Error(`Found ${lastCount} match(es) for "${selector}" but none were visible on screen after 4s of polling`);
 }
 
 // Going straight from a minimized window to 'maximized' via CDP is unreliable
@@ -47,12 +60,17 @@ async function ensureWindowVisible(page: Page): Promise<void> {
     await cdp.detach().catch(() => {});
   } catch { /* ignore */ }
 
-  // Fallback safety net in case the window is still tiny/off-screen.
+  // Force a consistent large viewport unconditionally — confirmed live that
+  // the CDP maximize above can still leave the window at a reduced height
+  // (e.g. 1280x609), which is short enough to trigger Velog's sticky-header
+  // duplication and break the write-button click. A small-size-only
+  // fallback wasn't enough since 609 isn't "small" by that check's old
+  // <400 threshold but is still short enough to break the header.
   try {
+    await page.setViewportSize({ width: 1280, height: 900 }).catch(() => {});
     const size = await page.evaluate(() => ({ w: window.innerWidth, h: window.innerHeight }));
-    if (size.w < 400 || size.h < 400) {
-      console.log(`   ⚠️ Window still small (${size.w}x${size.h}) — forcing viewport size`);
-      await page.setViewportSize({ width: 1280, height: 900 }).catch(() => {});
+    if (size.w < 1280 || size.h < 900) {
+      console.log(`   ⚠️ Viewport still ${size.w}x${size.h} after forcing — continuing anyway`);
     }
   } catch { /* ignore */ }
 }

@@ -26,6 +26,8 @@
  *   npm run dev -- run-calisthenics-batch   → run Calisthenics batch once now
  *   npm run dev -- run-substack-batch       → run Substack batch once now
  *   npm run dev -- run-hackmd-batch         → run HackMD batch once now
+ *   npm run dev -- run-tistory-batch        → run Tistory batch once now (New Logic slot 3)
+ *   npm run dev -- run-instagram-batch      → run Instagram batch once now (Social Media sheet, needs "Images URL")
  *   npm run dev -- save-medium-session <nickname> → login & save Medium cookies
  *   npm run dev -- save-linkmate-session <nickname> → login & save Linkmate cookies
  *   npm run dev -- save-googlesite-session <nickname> → login & save Google Sites session
@@ -47,6 +49,7 @@
  *   npm run dev -- run-naver-batch                    → run Naver batch once now
  *   npm run dev -- run-velog-batch                    → run Velog batch once now
  *   npm run dev -- run-coda-batch                     → run Coda batch once now
+ *   npm run dev -- run-mataroa-batch                  → run Mataroa batch once now (REST API, shares New Logic Slot 1)
  *   npm run dev -- tracker                  → daily posting tracker (posted/failed/pending per platform)
  *   npm run dev -- status                   → show current sheet stats
  *   npm run dev -- monitor                  → run one monitor cycle (for Claude CLI /loop)
@@ -54,11 +57,37 @@
 
 import 'dotenv/config';
 import fs from 'fs';
+import path from 'path';
+import { spawn, type ChildProcess } from 'child_process';
 import { initErrorInterceptor } from './errorInterceptor.js';
 import { startCoordinatorDaemon } from './scheduler-new.js';
 
 // Patch console.error/warn to stream to logs/runtime.log for monitor
 initErrorInterceptor();
+
+// Blocks Windows sleep (SetThreadExecutionState) for as long as this daemon
+// is alive. Tied to this process only — killing/crashing it lets the laptop
+// sleep normally again; a real shutdown/power-off is out of scope, only the
+// slot ledger's catch-up sweep recovers from that.
+let keepAwakeProcess: ChildProcess | null = null;
+function startKeepAwake() {
+  if (process.platform !== 'win32') return;
+  const scriptPath = path.join(process.cwd(), 'scripts', 'keep-awake.ps1');
+  keepAwakeProcess = spawn(
+    'powershell.exe',
+    ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptPath, '-ParentPid', String(process.pid)],
+    { windowsHide: true, stdio: 'ignore' }
+  );
+  keepAwakeProcess.on('error', (err) => console.error('[keep-awake] failed to start:', err));
+  console.log('[keep-awake] system sleep blocked while daemon is running');
+}
+function stopKeepAwake() {
+  keepAwakeProcess?.kill();
+  keepAwakeProcess = null;
+}
+process.on('exit', stopKeepAwake);
+process.on('SIGINT', () => { stopKeepAwake(); process.exit(); });
+process.on('SIGTERM', () => { stopKeepAwake(); process.exit(); });
 
 // Catch uncaught crashes that would otherwise kill the process silently
 process.on('uncaughtException', (err) => {
@@ -85,35 +114,99 @@ async function main() {
     return;
   }
 
+  // --row=N forces a specific Social Media sheet row through a platform's
+  // batch runner instead of letting it auto-pick eligible rows — for
+  // one-off testing of a known row, bypassing the "Status column empty"
+  // eligibility gate entirely. Shared by every run-<platform>-batch mode
+  // below that accepts it.
+  const rowFlagIdx = process.argv.findIndex(a => a.startsWith('--row='));
+  const rowOverrideArg = rowFlagIdx !== -1 ? parseInt(process.argv[rowFlagIdx].split('=')[1], 10) : undefined;
+  async function getRowOverride(): Promise<any[] | undefined> {
+    if (rowOverrideArg === undefined) return undefined;
+    const { getSheetRowByIndex } = await import('./sheets/sheets.js');
+    const row = await getSheetRowByIndex(rowOverrideArg, 'social');
+    if (!row) { console.error(`Row ${rowOverrideArg} not found.`); process.exit(1); }
+    return [row];
+  }
+
   if (mode === 'run-x-batch') {
-    console.log('▶ Running X batch now...\n');
+    console.log(`▶ Running X batch now${rowOverrideArg ? ` (row ${rowOverrideArg})` : ''}...\n`);
     const { runXBatch } = await import('./coordinator/masterCoordinator.js');
-    await runXBatch();
+    await runXBatch(1, await getRowOverride());
     console.log('\n✅ X batch complete');
     return;
   }
 
   if (mode === 'run-fb-batch') {
-    console.log('▶ Running FB batch now...\n');
+    console.log(`▶ Running FB batch now${rowOverrideArg ? ` (row ${rowOverrideArg})` : ''}...\n`);
     const { runFbBatch } = await import('./coordinator/masterCoordinator.js');
-    await runFbBatch();
+    await runFbBatch(1, await getRowOverride());
     console.log('\n✅ FB batch complete');
     return;
   }
 
   if (mode === 'run-tumblr-batch') {
-    console.log('▶ Running Tumblr batch now...\n');
+    console.log(`▶ Running Tumblr batch now${rowOverrideArg ? ` (row ${rowOverrideArg})` : ''}...\n`);
     const { runTumblrBatch } = await import('./coordinator/masterCoordinator.js');
-    await runTumblrBatch();
+    await runTumblrBatch(1, await getRowOverride());
     console.log('\n✅ Tumblr batch complete');
     return;
   }
 
   if (mode === 'run-li-batch') {
-    console.log('▶ Running LI batch now...\n');
+    console.log(`▶ Running LI batch now${rowOverrideArg ? ` (row ${rowOverrideArg})` : ''}...\n`);
     const { runLiBatch } = await import('./coordinator/masterCoordinator.js');
-    await runLiBatch({ manual: true }, 1);
+    await runLiBatch({ manual: true }, 1, await getRowOverride());
     console.log('\n✅ LI batch complete');
+    return;
+  }
+
+  if (mode === 'run-instagram-batch') {
+    console.log(`▶ Running Instagram batch now${rowOverrideArg ? ` (row ${rowOverrideArg})` : ''}...\n`);
+    const { runInstagramBatch } = await import('./coordinator/masterCoordinator.js');
+    await runInstagramBatch(1, await getRowOverride());
+    console.log('\n✅ Instagram batch complete');
+    return;
+  }
+
+  if (mode === 'run-instapaper-batch') {
+    console.log(`▶ Running Instapaper batch now${rowOverrideArg ? ` (row ${rowOverrideArg})` : ''}...\n`);
+    const { runInstapaperBatch } = await import('./coordinator/masterCoordinator.js');
+    await runInstapaperBatch(1, await getRowOverride());
+    console.log('\n✅ Instapaper batch complete');
+    return;
+  }
+
+  if (mode === 'run-raindrop-batch') {
+    console.log(`▶ Running Raindrop batch now${rowOverrideArg ? ` (row ${rowOverrideArg})` : ''}...\n`);
+    const { runRaindropBatch } = await import('./coordinator/masterCoordinator.js');
+    await runRaindropBatch(1, await getRowOverride());
+    console.log('\n✅ Raindrop batch complete');
+    return;
+  }
+
+  if (mode === 'run-pearltrees-batch') {
+    console.log(`▶ Running Pearltrees batch now${rowOverrideArg ? ` (row ${rowOverrideArg})` : ''}...\n`);
+    const { runPearltreesBatch } = await import('./coordinator/masterCoordinator.js');
+    await runPearltreesBatch(1, await getRowOverride());
+    console.log('\n✅ Pearltrees batch complete');
+    return;
+  }
+
+  if (mode === 'run-4shared-batch') {
+    // 4shared reads from the "New Logic" tab, not "Social Media" — a
+    // different sheetType than the shared getRowOverride() helper above.
+    let fourSharedRowOverride: any[] | undefined;
+    if (rowOverrideArg !== undefined) {
+      const { getSheetRowByIndex } = await import('./sheets/sheets.js');
+      const row = await getSheetRowByIndex(rowOverrideArg, 'newLogic');
+      if (!row) { console.error(`Row ${rowOverrideArg} not found.`); process.exit(1); }
+      fourSharedRowOverride = [row];
+    }
+    console.log(`▶ Running 4shared batch now${rowOverrideArg ? ` (row ${rowOverrideArg})` : ''}...\n`);
+    const { runFourSharedBatch } = await import('./coordinator/masterCoordinator.js');
+    await runFourSharedBatch(1, fourSharedRowOverride);
+    console.log('\n✅ 4shared batch complete');
     return;
   }
 
@@ -138,9 +231,10 @@ async function main() {
   if (mode === 'run-blog-gen') {
     const limit = Number(process.argv[3]) || 3;
     const withImage = !process.argv.includes('--no-image'); // full generation (blog + image) is the default
-    console.log(`▶ Running one blog-gen pass (limit ${limit}, image: ${withImage})...\n`);
+    const promptVersion = process.argv.includes('--master') ? 'master' as const : undefined; // force master prompt, skip the 50/50 Prompt B split
+    console.log(`▶ Running one blog-gen pass (limit ${limit}, image: ${withImage}${promptVersion ? ', prompt: master (forced)' : ''})...\n`);
     const { runBlogGenBatch } = await import('./coordinator/blogGenLoop.js');
-    const result = await runBlogGenBatch({ limit, withImage });
+    const result = await runBlogGenBatch({ limit, withImage, promptVersion });
     console.log(`\n✅ Blog-gen pass complete: ${result.generated}/${result.attempted} generated`);
     return;
   }
@@ -148,11 +242,12 @@ async function main() {
   if (mode === 'run-blog-gen-loop') {
     const limit = Number(process.argv[3]) || 3;
     const withImage = !process.argv.includes('--no-image'); // full generation (blog + image) is the default
+    const promptVersion = process.argv.includes('--master') ? 'master' as const : undefined; // force master prompt, skip the 50/50 Prompt B split
     const intervalArgIdx = process.argv.indexOf('--interval');
     const intervalSeconds = intervalArgIdx !== -1 ? Number(process.argv[intervalArgIdx + 1]) : undefined;
-    console.log(`▶ Starting continuous blog-gen loop (limit ${limit}/pass, image: ${withImage}, interval ${intervalSeconds ?? 1800}s)...\n`);
+    console.log(`▶ Starting continuous blog-gen loop (limit ${limit}/pass, image: ${withImage}${promptVersion ? ', prompt: master (forced)' : ''}, interval ${intervalSeconds ?? 1800}s)...\n`);
     const { runBlogGenLoop } = await import('./coordinator/blogGenLoop.js');
-    await runBlogGenLoop({ limit, withImage, intervalSeconds }); // never returns — Ctrl+C to stop
+    await runBlogGenLoop({ limit, withImage, promptVersion, intervalSeconds }); // never returns — Ctrl+C to stop
     return;
   }
 
@@ -180,6 +275,14 @@ async function main() {
     return;
   }
 
+  if (mode === 'run-tistory-batch') {
+    console.log('▶ Running Tistory batch now...\n');
+    const { runTistoryBatch } = await import('./coordinator/masterCoordinator.js');
+    await runTistoryBatch();
+    console.log('\n✅ Tistory batch complete');
+    return;
+  }
+
   if (mode === 'run-wordpress-batch') {
     console.log('▶ Running WordPress batch now...\n');
     const { runWordpressBatch } = await import('./coordinator/masterCoordinator.js');
@@ -200,6 +303,13 @@ async function main() {
     console.log('▶ Running Note batch now...\n');
     const { runNoteBatch } = await import('./coordinator/masterCoordinator.js');
     await runNoteBatch(1);
+    return;
+  }
+
+  if (mode === 'run-vcru-batch') {
+    console.log('▶ Running vc.ru batch now...\n');
+    const { runVcruBatch } = await import('./coordinator/masterCoordinator.js');
+    await runVcruBatch(1);
     return;
   }
 
@@ -252,9 +362,20 @@ async function main() {
   }
 
   if (mode === 'run-notion-batch') {
-    console.log('▶ Running Notion batch now...\n');
+    // Notion reads from the "New Logic" tab, not "Social Media" — a
+    // different sheetType than the shared getRowOverride() helper above.
+    const rowFlagIdxNotion = process.argv.findIndex(a => a.startsWith('--row='));
+    const rowArgNotion = rowFlagIdxNotion !== -1 ? parseInt(process.argv[rowFlagIdxNotion].split('=')[1], 10) : undefined;
+    let notionRowOverride: any[] | undefined;
+    if (rowArgNotion !== undefined) {
+      const { getSheetRowByIndex } = await import('./sheets/sheets.js');
+      const row = await getSheetRowByIndex(rowArgNotion, 'newLogic');
+      if (!row) { console.error(`Row ${rowArgNotion} not found.`); process.exit(1); }
+      notionRowOverride = [row];
+    }
+    console.log(`▶ Running Notion batch now${rowArgNotion ? ` (row ${rowArgNotion})` : ''}...\n`);
     const { runNotionBatch } = await import('./coordinator/masterCoordinator.js');
-    await runNotionBatch();
+    await runNotionBatch(1, notionRowOverride);
     console.log('\n✅ Notion batch complete');
     return;
   }
@@ -280,6 +401,14 @@ async function main() {
     const { runCodaBatch } = await import('./coordinator/masterCoordinator.js');
     await runCodaBatch();
     console.log('\n✅ Coda batch complete');
+    return;
+  }
+
+  if (mode === 'run-mataroa-batch') {
+    console.log('▶ Running Mataroa batch now...\n');
+    const { runMataroaBatch } = await import('./coordinator/masterCoordinator.js');
+    await runMataroaBatch();
+    console.log('\n✅ Mataroa batch complete');
     return;
   }
 
@@ -438,6 +567,18 @@ async function main() {
     }
     const { saveNoteSession } = await import('./coordinator/masterCoordinator.js');
     await saveNoteSession(nickname);
+    return;
+  }
+
+  if (mode === 'save-vcru-session') {
+    const nickname = process.argv[3];
+    if (!nickname) {
+      console.error('❌ Usage: npm run dev -- save-vcru-session <nickname>');
+      console.error('   Example: npm run dev -- save-vcru-session pranav');
+      process.exit(1);
+    }
+    const { saveVcruSession } = await import('./coordinator/masterCoordinator.js');
+    await saveVcruSession(nickname);
     return;
   }
 
@@ -952,6 +1093,7 @@ async function main() {
   }
 
   // Default: start cron scheduler daemon
+  startKeepAwake();
   await startCoordinatorDaemon();
 
   // RSS feed of recently-published reports, for faster search-engine

@@ -7,7 +7,7 @@ import { killChromeForProfile } from '../../utils/killChrome.js';
 export interface InstagramAccount {
   nickname: string;
   username: string;
-  password: string;
+  password?: string;
   active: boolean;
 }
 
@@ -24,7 +24,11 @@ export function getInstagramAccounts(): InstagramAccount[] {
 export function getInstagramAccountByNickname(nickname: string): InstagramAccount | undefined {
   const accounts = getInstagramAccounts();
   const needle = nickname.toLowerCase();
-  return accounts.find(a => a.active && a.nickname.toLowerCase() === needle) ?? accounts.find(a => a.active);
+  // No fallback to "any active account" — that silently substituted
+  // whichever account happened to be first in the list (confirmed live
+  // 2026-09-23: every nickname that wasn't actually in the file ended up
+  // reusing "aniket"'s session instead of a clear "not found" error).
+  return accounts.find(a => a.active && a.nickname.toLowerCase() === needle);
 }
 
 export async function closeInstagramBrowser(): Promise<void> {
@@ -49,13 +53,18 @@ export async function loginToInstagram(account: InstagramAccount): Promise<Page>
     throw new Error(`Chrome not found at ${chromePath}. Set CHROME_PATH env var.`);
   }
 
+  // Every other platform in this project runs visibly (headless: false,
+  // no env toggle) — Instagram was the one exception, defaulting to
+  // headless unless HEADLESS=false was set. Confirmed live 2026-09-23: a
+  // batch run died silently mid-flow with no error logged, consistent
+  // with a headless-Chrome crash rather than a caught failure. Match the
+  // rest of the project instead of guessing why headless was flakier here.
   browserContext = await chromium.launchPersistentContext(sessionDir, {
-    headless: true,
+    headless: false,
     executablePath: chromePath,
     slowMo: 50,
     ignoreDefaultArgs: ['--enable-automation'],
     args: [
-      '--start-minimized',
       '--window-size=1366,768',
       '--disable-blink-features=AutomationControlled',
       '--disable-renderer-backgrounding',
@@ -83,6 +92,16 @@ export async function loginToInstagram(account: InstagramAccount): Promise<Page>
     return page;
   }
 
+  // No password stored (accounts logged in via src/tools/loginInstagram.ts's
+  // manual-session flow instead) — nothing to auto-fill. Hand the page back
+  // and let the caller decide (batch code should treat "not logged in" as a
+  // hard failure telling the user to run the manual login tool for this
+  // nickname, same as Note).
+  if (!account.password) {
+    console.warn(`   ⚠️  No saved session for "${account.nickname}" and no password on file — run: npx tsx src/tools/loginInstagram.ts ${account.nickname}`);
+    return page;
+  }
+
   console.log(`   Logging in as ${account.username}...`);
 
   // Go to login page if not already there
@@ -91,11 +110,31 @@ export async function loginToInstagram(account: InstagramAccount): Promise<Page>
     await page.waitForTimeout(2000);
   }
 
-  const userField = page.locator('input[name="username"]').first();
-  const passField = page.locator('input[name="password"]').first();
-  const loginBtn  = page.locator('button[type="submit"]').first();
+  // Confirmed live 2026-09-23 via HTML dump: the real input name is "email",
+  // not "username" — kept both, comma-separated, in case Instagram varies
+  // this across accounts/sessions the way LinkedIn does for its own forms.
+  const userField = page.locator('input[name="email"], input[name="username"]').first();
+  // Confirmed live 2026-09-23 via HTML dump: password field is
+  // name="pass", not name="password".
+  const passField = page.locator('input[name="pass"], input[name="password"], input[type="password"]').first();
+  // Confirmed live 2026-09-23 via HTML dump: the real login control is
+  // <div role="button" aria-label="Log In">, not a <button type="submit">
+  // at all — kept the old selector as a fallback in case that varies too.
+  const loginBtn  = page.locator('div[role="button"][aria-label="Log In"], button[type="submit"]').first();
 
-  await userField.waitFor({ state: 'visible', timeout: 15000 });
+  try {
+    await userField.waitFor({ state: 'visible', timeout: 15000 });
+  } catch (err) {
+    // Dump evidence instead of guessing why — could be a cookie-consent
+    // dialog, a changed login form, or a checkpoint/challenge page.
+    const debugDir = path.resolve('logs');
+    fs.mkdirSync(debugDir, { recursive: true });
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    await page.screenshot({ path: path.join(debugDir, `ig-login-timeout-${account.nickname}-${stamp}.png`) }).catch(() => {});
+    fs.writeFileSync(path.join(debugDir, `ig-login-timeout-${account.nickname}-${stamp}.html`), await page.content().catch(() => ''), 'utf8');
+    console.error(`   ⚠️  Username field never appeared (URL: ${page.url()}) — dumped ${debugDir}\\ig-login-timeout-${account.nickname}-${stamp}.*`);
+    throw err;
+  }
   await userField.fill(account.username);
   await page.waitForTimeout(500);
   await passField.fill(account.password);

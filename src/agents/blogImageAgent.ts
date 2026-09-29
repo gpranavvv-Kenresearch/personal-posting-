@@ -23,10 +23,14 @@ import { pasteIntoChatGptComposer, dismissBlockingModals } from '../utils/chatgp
 import { recordChatGptFailure, recordChatGptSuccess } from '../config/chatGptAccountTracker.js';
 import { uploadFileToGoogleDrive } from '../utils/googleDriveUpload.js';
 
-const COMPOSER_SELECTOR = '#prompt-textarea';
-const LOGIN_BUTTON_SELECTOR = 'button:has-text("Log in"), a:has-text("Log in")';
-const MANUAL_LOGIN_TIMEOUT_MS = 120_000;
-const ASSISTANT_MESSAGE_SELECTOR = '[data-message-author-role="assistant"]';
+// Matches both the old #prompt-textarea id and the new UI's bare
+// div.ProseMirror composer (no id) — see the comment on the canonical
+// definition in src/browser/chatgpt/login.ts for the full explanation.
+const COMPOSER_SELECTOR = '#prompt-textarea, div[contenteditable="true"].ProseMirror';
+// Matches both the old data-message-author-role attribute and the new UI's
+// div[data-markdown-text-style="assistant-message"] — see the comment on
+// blogGenAgent.ts's copy of this constant for the full explanation.
+const ASSISTANT_MESSAGE_SELECTOR = '[data-message-author-role="assistant"], [data-markdown-text-style="assistant-message"]';
 
 // Dedicated account for cover-IMAGE generation — kept separate from
 // blogGenAgent.ts's default account so the two always run in separate
@@ -599,21 +603,14 @@ async function minimizeToTaskbar(context: BrowserContext, page: Page): Promise<v
   } catch { /* ignore if CDP unavailable */ }
 }
 
-async function waitUntilLoggedIn(page: Page): Promise<boolean> {
-  if (await isLoggedIn(page)) {
-    console.log('   ✅ ChatGPT: already logged in (session restored)');
-    return true;
-  }
-  const loginBtn = page.locator(LOGIN_BUTTON_SELECTOR).first();
-  if (await loginBtn.isVisible().catch(() => false)) await loginBtn.click().catch(() => {});
-  console.log(`   ⚠️  ChatGPT: no active session — restore the minimized Chrome window from the taskbar and log in manually (waiting up to ${MANUAL_LOGIN_TIMEOUT_MS / 1000}s)...`);
-  try {
-    await page.locator(COMPOSER_SELECTOR).first().waitFor({ state: 'visible', timeout: MANUAL_LOGIN_TIMEOUT_MS });
-    console.log('   ✅ ChatGPT: manual login detected — session saved for future runs');
-    return true;
-  } catch {
-    return false;
-  }
+// Diagnostic only — never blocks for a manual login and never aborts the
+// run. These generate scripts run unattended under the cron daemon, where
+// nobody is watching to log in by hand, so the old 120s manual-login wait
+// just stalled the batch before failing anyway.
+async function logChatGptSessionState(page: Page): Promise<void> {
+  console.log(await isLoggedIn(page)
+    ? '   ✅ ChatGPT: session active (composer visible)'
+    : '   ⚠️  ChatGPT: composer not visible — continuing anyway (session may be expired)');
 }
 
 /**
@@ -662,9 +659,7 @@ async function runCoverImageGeneration(params: {
     await page.goto('https://chatgpt.com/new', { waitUntil: 'domcontentloaded', timeout: 60000 });
     await page.waitForTimeout(2000);
 
-    if (!(await waitUntilLoggedIn(page))) {
-      throw new Error(`ChatGPT (account "${accountName}"): not logged in and manual login was not completed in time.`);
-    }
+    await logChatGptSessionState(page);
 
     console.log(`   [image:${accountName}] Sending cover-image prompt for: "${params.marketName}" (up to ~15 min)...`);
     await pasteIntoChatGptComposer(page, prompt);
@@ -697,19 +692,38 @@ async function runCoverImageGeneration(params: {
     const imgSrc = finalImage?.src || generatedImage.src;
     if (!imgSrc) throw new Error('Could not resolve final image src after stability wait');
 
-    // Download via browser fetch (preserves auth cookies).
+    // Download via browser fetch (preserves auth cookies). "Failed to
+    // fetch" here is almost always a transient network blip, not a real
+    // failure — confirmed live 2026-09-18 the image WAS found and stable,
+    // only the fetch() call itself hiccuped. Retry the fetch in place
+    // rather than closing the browser and losing the (already-generated,
+    // already-found) image entirely.
     console.log('   Downloading generated image...');
-    const base64Data: string = await page.evaluate(async (url: string) => {
-      const response = await fetch(url);
-      if (!response.ok) throw new Error(`Fetch failed: ${response.status}`);
-      const blob = await response.blob();
-      return new Promise<string>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onloadend = () => resolve((reader.result as string).split(',')[1]);
-        reader.onerror = reject;
-        reader.readAsDataURL(blob);
-      });
-    }, imgSrc);
+    const MAX_DOWNLOAD_ATTEMPTS = 4;
+    let base64Data = '';
+    let downloadErr: any = null;
+    for (let attempt = 1; attempt <= MAX_DOWNLOAD_ATTEMPTS; attempt++) {
+      try {
+        base64Data = await page.evaluate(async (url: string) => {
+          const response = await fetch(url);
+          if (!response.ok) throw new Error(`Fetch failed: ${response.status}`);
+          const blob = await response.blob();
+          return new Promise<string>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onloadend = () => resolve((reader.result as string).split(',')[1]);
+            reader.onerror = reject;
+            reader.readAsDataURL(blob);
+          });
+        }, imgSrc);
+        downloadErr = null;
+        break;
+      } catch (err: any) {
+        downloadErr = err;
+        console.log(`   ⚠️ Image download attempt ${attempt}/${MAX_DOWNLOAD_ATTEMPTS} failed: ${err.message}`);
+        if (attempt < MAX_DOWNLOAD_ATTEMPTS) await page.waitForTimeout(4000);
+      }
+    }
+    if (downloadErr) throw downloadErr;
 
     const imageBuffer = Buffer.from(base64Data, 'base64');
     const publicId = `${params.marketName.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 55)}-${Math.floor(Date.now() / 1000)}`;

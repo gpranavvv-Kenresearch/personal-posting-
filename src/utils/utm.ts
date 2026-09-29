@@ -37,6 +37,9 @@ export const UTM_PARAMS = {
   FourShared: '?utm_source=4shared&utm_medium=referral&utm_campaign=automation',
   Scribd: '?utm_source=scribd&utm_medium=referral&utm_campaign=automation',
   Telegraph: '?utm_source=telegraph&utm_medium=referral&utm_campaign=automation',
+  Mataroa: '?utm_source=mataroa&utm_medium=referral&utm_campaign=automation',
+  Vcru: '?utm_source=vcru&utm_medium=referral&utm_campaign=automation',
+  Newsletter: '?utm_source=newsletter&utm_medium=email&utm_campaign=automation',
 };
 
 /**
@@ -49,9 +52,25 @@ export function injectUTM(content: string, utmString: string): string {
   const utmParams = utmString.replace(/^\?/, ''); // strip leading ?
   const urlRegex = /(https?:\/\/[^\s<>"']+)/g;
 
-  return content.replace(urlRegex, (match) => {
+  return content.replace(urlRegex, (match, _g1, offset: number, whole: string) => {
     // Never touch image/media URLs
     if (match.match(/\.(jpg|jpeg|png|gif|webp|svg)$/i)) {
+      return match;
+    }
+
+    // Anything inside an <img src="..."> is an image, even with no file
+    // extension (Google Drive /d/<id> URLs have none) — must stay byte-for-byte.
+    if (/src\s*=\s*["']$/i.test(whole.slice(Math.max(0, offset - 12), offset))) {
+      return match;
+    }
+    if (/^https?:\/\/(lh\d+\.googleusercontent\.com|drive\.google\.com)\//i.test(match)) {
+      return match;
+    }
+
+    // Preferred Source CTA links: the direct Google deeplink and the tracked
+    // short URL must never be modified.
+    if (/^https?:\/\/(www\.)?google\.com\/preferences\/source/i.test(match) ||
+        /^https?:\/\/(www\.)?encurtador\.dev\//i.test(match)) {
       return match;
     }
 

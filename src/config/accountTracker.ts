@@ -4,10 +4,12 @@
  * Tracks how many posts each account has made today per platform.
  * Persists to .sessions/daily-counts.json — auto-resets when date changes.
  *
- * Per-account daily limits:
- *   X         : 2 posts/day
- *   Facebook  : 4  posts/day
- *   LinkedIn  : 3  posts/day
+ * Per-account daily limits: REMOVED 2026-09-22 per explicit instruction
+ * ("Remove all kind of limits") — LIMITS below is now effectively
+ * unlimited (Infinity) rather than deleted outright, so the counting/
+ * tracking infrastructure (getCount, printDailyUsage, etc.) still works
+ * and limits can be reinstated by editing these numbers alone if ever
+ * asked for again.
  */
 
 import fs from 'fs';
@@ -18,9 +20,9 @@ import { getLinkedInAccounts } from '../browser/linkedin/login.js';
 const COUNTS_FILE = path.resolve('.sessions/daily-counts.json');
 
 const LIMITS = {
-  x:         2,   // 2 posts/day per X account (15 accounts × 2 = 30 X posts/day)
-  facebook:  5,   // 4-5 posts/day per FB account  (15 accounts × 5  = 75 FB posts/day)
-  linkedin:  3,   // 3 posts/day per LI account     (15 accounts × 3  = 45 LI posts/day)
+  x:         Infinity,
+  facebook:  Infinity,
+  linkedin:  Infinity,
 };
 
 interface DailyCounts {

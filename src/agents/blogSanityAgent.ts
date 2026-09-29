@@ -24,11 +24,20 @@ export interface BlogSanityResult {
 // single-quoted alt='...' attribute early, corrupting the rest of the tag.
 // Handles double-quoted/unquoted attrs and already-correct tags.
 // ---------------------------------------------------------------------------
-function normalizeImgTags(html: string, ctx: BlogSanityContext): { html: string; changed: boolean } {
+export function normalizeImgTags(html: string, ctx: BlogSanityContext): { html: string; changed: boolean } {
   let changed = false;
 
   const out = html.replace(/<img\b[^>]*>/gi, (tag) => {
-    const srcMatch = tag.match(/\bsrc\s*=\s*(?:'([^']*)'|"([^"]*)"|([^\s>]+))/i);
+    // ChatGPT sometimes doubles the src quote on top of the real attribute
+    // quotes — e.g. src=""https://...""  — which the quote-matching regex
+    // below reads as an EMPTY quoted string (opening quote immediately
+    // followed by another quote), producing src='' and leaving the broken
+    // doubled-quote tag untouched instead of fixing it (confirmed live on a
+    // published post). Collapse any run of 2+ quotes down to 1 BEFORE
+    // extracting src, so this malformed shape gets read the same as a
+    // normal double-quoted one.
+    const collapsedTag = tag.replace(/="{2,}/g, '="').replace(/"{2,}(?=[\s>/])/g, '"');
+    const srcMatch = collapsedTag.match(/\bsrc\s*=\s*(?:'([^']*)'|"([^"]*)"|([^\s>]+))/i);
 
     const src = (srcMatch?.[1] ?? srcMatch?.[2] ?? srcMatch?.[3] ?? '').trim();
     if (!src) return tag; // nothing to normalize against — leave untouched

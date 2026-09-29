@@ -8,12 +8,17 @@ import { safeCloseContext } from '../../utils/safeClose.js';
 import { sessionDirForAccount } from '../../config/chatGptAccountTracker.js';
 
 const CHROME_PATH = process.env.CHROME_PATH || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
-const MANUAL_LOGIN_TIMEOUT_MS = 120_000; // logging into chatgpt.com by hand (incl. any challenge) takes longer than a password field
 
-const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
-
-// Composer is a contenteditable ProseMirror div, not a <textarea>, in current chatgpt.com.
-const COMPOSER_SELECTOR = '#prompt-textarea';
+// Composer is a contenteditable ProseMirror div, not a <textarea>, in current
+// chatgpt.com. ChatGPT rolled out a UI redesign (confirmed live 2026-09-26,
+// screenshotted on the "social-image" account: new "Chat"/"Work" toggle,
+// "Ask ChatGPT" input) that dropped the #prompt-textarea id entirely — the
+// composer is now a bare `div.ProseMirror[contenteditable="true"]` with no
+// id. The rollout is staggered per-account (the "account2" ChatGPT session
+// still had the old #prompt-textarea id at the same time), so match both,
+// comma-separated (Playwright locators support a CSS selector list same as
+// querySelectorAll) — whichever UI a given account currently has.
+const COMPOSER_SELECTOR = '#prompt-textarea, div[contenteditable="true"].ProseMirror';
 const LOGIN_BUTTON_SELECTOR = 'button:has-text("Log in"), a:has-text("Log in")';
 
 let browserContext: BrowserContext | null = null;
@@ -65,6 +70,12 @@ async function launchBrowser(accountName: string): Promise<Page> {
       '--no-default-browser-check',
       '--disable-session-crashed-bubble',
       '--disable-infobars',
+      // Without an explicit window size, Chrome opens at whatever size the
+      // profile last saved (or the OS default) while the PAGE renders at
+      // the 1366x900 viewport above — the mismatch is what shows up as a
+      // skewed/zoomed window with buttons cut off. Match the two exactly.
+      '--window-size=1366,900',
+      '--window-position=0,0',
     ],
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
   });
@@ -87,11 +98,7 @@ async function launchBrowser(accountName: string): Promise<Page> {
  */
 export async function ensureChatGptPage(accountName: string): Promise<Page> {
   const p = await launchBrowser(accountName);
-  const loggedIn = await waitUntilLoggedIn(p);
-  if (!loggedIn) {
-    await closeChatGptBrowser();
-    throw new Error(`ChatGPT (account: ${accountName}): not logged in and manual login was not completed in time.`);
-  }
+  await logSessionState(p);
   return p;
 }
 
@@ -140,34 +147,20 @@ async function isComposerVisible(p: Page): Promise<boolean> {
   return await p.locator(COMPOSER_SELECTOR).first().isVisible().catch(() => false);
 }
 
-async function waitUntilLoggedIn(p: Page): Promise<boolean> {
-  // Already logged in from a prior run (persisted session)?
-  const already = await p.locator(COMPOSER_SELECTOR).first()
+// Diagnostic only — never blocks for a manual login and never aborts the
+// run. The unattended generate scripts run under the cron daemon where
+// nobody is watching to log in by hand, so the old 120s manual-login wait
+// just stalled the batch before failing anyway. Log what we see and let
+// the caller proceed; if the session really is dead, the composer step
+// downstream fails on its own with a specific error.
+async function logSessionState(p: Page): Promise<void> {
+  const composerVisible = await p.locator(COMPOSER_SELECTOR).first()
     .waitFor({ state: 'visible', timeout: 8000 })
     .then(() => true)
     .catch(() => false);
-  if (already) {
-    console.log('   ✅ ChatGPT: already logged in (session restored)');
-    return true;
-  }
-
-  // Not logged in — surface the login button if present, then wait for the
-  // user to complete login (and any challenge) by hand.
-  const loginBtn = p.locator(LOGIN_BUTTON_SELECTOR).first();
-  if (await loginBtn.isVisible().catch(() => false)) {
-    await loginBtn.click().catch(() => {});
-  }
-
-  console.log(`   ⚠️  ChatGPT: no active session — please log in manually in the open browser window (waiting up to ${MANUAL_LOGIN_TIMEOUT_MS / 1000}s)...`);
-  try {
-    await p.locator(COMPOSER_SELECTOR).first().waitFor({ state: 'visible', timeout: MANUAL_LOGIN_TIMEOUT_MS });
-    console.log('   ✅ ChatGPT: manual login detected — session saved for future runs');
-    await sleep(1000);
-    return true;
-  } catch {
-    console.error(`   ❌ ChatGPT: manual login not detected within ${MANUAL_LOGIN_TIMEOUT_MS / 1000}s`);
-    return false;
-  }
+  console.log(composerVisible
+    ? '   ✅ ChatGPT: session active (composer visible)'
+    : '   ⚠️  ChatGPT: composer not visible — continuing anyway (session may be expired)');
 }
 
 export { COMPOSER_SELECTOR };

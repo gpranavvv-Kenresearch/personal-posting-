@@ -11,7 +11,45 @@
 // newlines correctly. Falls back to keyboard.insertText if the paste event
 // doesn't take. Aborts hard if neither approach gets the full prompt in.
 
-const COMPOSER_SELECTOR = '#prompt-textarea';
+// Confirmed live 2026-09-24 via HTML dump: chatgpt.com/images (this
+// script's page) uses a completely different editor than the main chat
+// page — a ProseMirror contenteditable div with an aria-label along the
+// lines of "Describe an image", not the Lexical #prompt-textarea. Kept
+// both, comma-separated, in case either page variant is ever hit through
+// this helper.
+//
+// The exact aria-label wording is NOT stable — confirmed live 2026-09-28
+// ChatGPT silently changed it from "Describe an image" to "Describe a new
+// image", which made the old exact-match selector match nothing and time
+// out even though the composer was plainly visible on screen. Match on
+// aria-label *containing* "Describe" (case-insensitive) instead of the
+// full string, and also fall back to the generic ProseMirror class (same
+// fallback the main chat composer selector in src/browser/chatgpt/login.ts
+// uses) so a future wording change doesn't break this again.
+const COMPOSER_SELECTOR = 'div[contenteditable="true"][aria-label*="Describe" i], div[contenteditable="true"].ProseMirror, #prompt-textarea';
+
+// Same fix as src/utils/chatgptComposer.ts's waitForComposerWithReload: the
+// composer sometimes never appears within a flat wait because chatgpt.com's
+// own SPA render got stuck (e.g. right after a session was re-logged-in,
+// or a stale tab) — a hard refresh clears that far more reliably than
+// waiting longer on the same broken page.
+async function waitForComposerWithReload(page, composer) {
+  const visible = await composer.waitFor({ state: 'visible', timeout: 5000 }).then(() => true).catch(() => false);
+  if (visible) return;
+
+  console.log('  [composer] Composer not visible — hard refreshing...');
+  await page.waitForTimeout(5000);
+  await page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+  await page.waitForTimeout(5000);
+
+  const gotIt = page.getByRole('button', { name: 'Got it', exact: true }).first();
+  if (await gotIt.isVisible({ timeout: 500 }).catch(() => false)) {
+    await gotIt.click().catch(() => {});
+    await page.waitForTimeout(300);
+  }
+
+  await composer.waitFor({ state: 'visible', timeout: 15000 });
+}
 
 export async function pasteIntoChatGPTComposer(page, text, opts = {}) {
   const { minFillRatio = 0.5 } = opts;
@@ -26,8 +64,18 @@ export async function pasteIntoChatGPTComposer(page, text, opts = {}) {
   });
   await page.waitForTimeout(300);
 
+  // Page-wide fallback: ChatGPT's "Too many requests" rate-limit popup
+  // doesn't always carry the named modal's id/data-testid above, so it can
+  // survive the removal step. Click its "Got it" button wherever it is.
+  const gotIt = page.getByRole('button', { name: 'Got it', exact: true }).first();
+  if (await gotIt.isVisible({ timeout: 500 }).catch(() => false)) {
+    await gotIt.click().catch(() => {});
+    console.log('[composer] Dismissed "Got it" popup');
+    await page.waitForTimeout(300);
+  }
+
   const composer = page.locator(COMPOSER_SELECTOR).first();
-  await composer.waitFor({ state: 'visible', timeout: 15000 });
+  await waitForComposerWithReload(page, composer);
   await composer.click();
   await page.waitForTimeout(300);
 

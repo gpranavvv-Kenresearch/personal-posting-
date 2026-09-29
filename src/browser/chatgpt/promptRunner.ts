@@ -36,7 +36,10 @@ turndownService.addRule('plainLinks', {
 
 const SEND_BUTTON_SELECTOR = 'button[data-testid="send-button"]';
 const STOP_BUTTON_SELECTOR = 'button[data-testid="stop-button"]';
-const ASSISTANT_MESSAGE_SELECTOR = '[data-message-author-role="assistant"]';
+// Matches both the old data-message-author-role attribute and the new UI's
+// div[data-markdown-text-style="assistant-message"] (confirmed live
+// 2026-09-26 — ChatGPT dropped the old attribute in a UI redesign).
+const ASSISTANT_MESSAGE_SELECTOR = '[data-message-author-role="assistant"], [data-markdown-text-style="assistant-message"]';
 
 const RESPONSE_TIMEOUT_MS = 120_000; // long prompts (2,000+ chars) can take a while to fully stream
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));

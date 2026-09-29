@@ -1,6 +1,57 @@
 import { Page } from 'playwright';
+import fs from 'node:fs';
+import path from 'node:path';
 import { humanDelay } from '../stagehand.js';
 import 'dotenv/config';
+
+// ── Image attach ────────────────────────────────────────────────────────────
+// Primary: set the file directly on the underlying <input type="file"> —
+// this never clicks the visible "Add photos or video" button, so it never
+// triggers X's own click handler and therefore never risks a real native OS
+// file-open dialog popping up and blocking the flow (confirmed live: the
+// click+filechooser approach alone let the native dialog through).
+// Fallback: click+filechooser-interception, same pattern as
+// linkedin/imagePoster.ts, for when the raw input isn't directly reachable.
+const FILE_INPUT_SEL = 'input[data-testid="fileInput"]';
+const ADD_MEDIA_BUTTON_SEL = 'button[aria-label="Add photos or video"]';
+
+async function attachImage(page: Page, imagePath: string): Promise<boolean> {
+  if (!fs.existsSync(imagePath)) {
+    console.warn(`   ⚠️ Image not found at path: ${imagePath} — posting text only`);
+    return false;
+  }
+  const absImagePath = path.resolve(imagePath);
+
+  try {
+    const fileInput = page.locator(FILE_INPUT_SEL).first();
+    if (await fileInput.count() > 0) {
+      await fileInput.setInputFiles(absImagePath);
+      await humanDelay(2500, 3500); // let the image preview render before typing
+      return true;
+    }
+  } catch (err: any) {
+    console.warn(`   ⚠️ Direct file-input upload failed, falling back to click+filechooser: ${err.message?.split('\n')[0] ?? err}`);
+  }
+
+  const addMediaBtn = page.locator(ADD_MEDIA_BUTTON_SEL).first();
+  try {
+    const visible = await addMediaBtn.isVisible({ timeout: 5000 }).catch(() => false);
+    if (!visible) {
+      console.warn('   ⚠️ "Add photos or video" button not found — posting text only');
+      return false;
+    }
+    const [fileChooser] = await Promise.all([
+      page.waitForEvent('filechooser', { timeout: 10_000 }),
+      addMediaBtn.click({ force: true }),
+    ]);
+    await fileChooser.setFiles(absImagePath);
+    await humanDelay(2500, 3500);
+    return true;
+  } catch (err: any) {
+    console.warn(`   ⚠️ Image upload failed (continuing text-only): ${err.message?.split('\n')[0] ?? err}`);
+    return false;
+  }
+}
 
 // Simulates real keystroke typing — `insertText` bypasses key events and is
 // detected as automation. This fires actual keydown/keypress/keyup per char.
@@ -175,7 +226,7 @@ async function openTweetComposer(page: Page, xHandle: string): Promise<void> {
   console.warn('   ⚠️ Tweet composer not found on x.com/home — continuing anyway (nothing was clicked).');
 }
 
-export async function postTweet(page: Page, tweetText: string, handle?: string) {
+export async function postTweet(page: Page, tweetText: string, handle?: string, imagePath?: string) {
   const xHandle = handle || process.env.X_HANDLE!;
 
   console.log('   Navigating to home...');
@@ -189,6 +240,21 @@ export async function postTweet(page: Page, tweetText: string, handle?: string) 
   console.log('   Opening tweet composer...');
   await openTweetComposer(page, xHandle);
   await humanDelay(1000, 1500);
+
+  if (imagePath) {
+    console.log('   Attaching image...');
+    const attached = await attachImage(page, imagePath);
+    if (attached) {
+      // Uploading the image can shift focus onto the thumbnail's "Add
+      // description" (alt-text) overlay instead of leaving it on the main
+      // composer — confirmed live: typed text was landing there instead of
+      // the tweet body. Explicitly re-click the real composer box before
+      // typing so focus is never ambiguous.
+      console.log('   Re-focusing tweet composer after image upload...');
+      await page.locator('[data-testid="tweetTextarea_0"]').first().click({ force: true }).catch(() => {});
+      await humanDelay(500, 800);
+    }
+  }
 
   console.log('   Typing tweet...');
   await typeWithVerification(page, 0, tweetText);

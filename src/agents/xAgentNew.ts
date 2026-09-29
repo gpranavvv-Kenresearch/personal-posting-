@@ -45,6 +45,7 @@ export async function runXAgent(params: {
   accountHandle: string;
   seoScore?: number;
   sanityIssues?: string[];
+  imagePath?: string;
 }): Promise<XAgentResult> {
   const base = {
     tweetText: params.tweetText,
@@ -68,6 +69,7 @@ export async function runXAgent(params: {
   const postResult = await executeBrowserTool('post_tweet', {
     tweetText: params.tweetText,
     handle: realHandle,
+    imagePath: params.imagePath,
   });
 
   if (!postResult.success) {

@@ -24,7 +24,12 @@
     "generate:fb": "node --import=tsx src/tools/generateSocialPosts.ts fb",
     "generate:li": "node --import=tsx src/tools/generateSocialPosts.ts li",
     "generate:fb-li": "node --import=tsx src/tools/generateFbLiPosts.ts",
-    "login:chatgpt": "node --import=tsx src/tools/loginChatGpt.ts"
+    "login:chatgpt": "node --import=tsx src/tools/loginChatGpt.ts",
+    "newsletter:test": "node --import=tsx src/tools/testNewsletterOutlook.ts",
+    "newsletter:batch": "node --import=tsx -e \"import('./src/newsletter-outlook/runNewsletterBatch.ts').then(m=>m.runNewsletterBatch())\"",
+    "newsletter:campaign:generate": "node --import=tsx -e \"import('./src/newsletter-outlook/runNewsletterCampaignBatch.ts').then(m=>m.generateStep())\"",
+    "newsletter:campaign:send": "node --import=tsx -e \"import('./src/newsletter-outlook/runNewsletterCampaignBatch.ts').then(m=>m.sendStep())\"",
+    "login:chatgpt:newsletter": "node --import=tsx src/tools/loginChatGpt.ts newsletter"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",

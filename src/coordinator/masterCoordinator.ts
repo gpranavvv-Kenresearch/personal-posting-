@@ -66,8 +66,10 @@ import { applyFix } from '../autoFix.js';
 import { postToHackMDApi } from '../browser/hackmd/apiPoster.js';
 import { getHackMDAccounts } from '../browser/hackmd/login.js';
 import { runSeoAnalysis } from '../agents/seoAgentNew.js';
-import { generateTweet, generateXThread, generateFbPost, generateTumblrPost, generateLiPost, generateMediumPost, generateGoogleSitePost, generateDevtoPost, generateLinkedinPulsePost, generateCalisthenicsPost, generateSubstackPost, generateHackmdPost, generateLinkmatePost, generateMastodonPost, generateTelegraphPost, generateBookmarkNote, MAX_POST_LENGTH, hasUnfilledPlaceholder } from '../agents/contentAgentNew.js';
+import { generateTweet, generateXThread, generateFbPost, generateTumblrPost, generateLiPost, generateMediumPost, generateVcruPost, generateGoogleSitePost, generateDevtoPost, generateLinkedinPulsePost, generateCalisthenicsPost, generateSubstackPost, generateHackmdPost, generateLinkmatePost, generateMastodonPost, generateTelegraphPost, generateBookmarkNote, MAX_POST_LENGTH, hasUnfilledPlaceholder } from '../agents/contentAgentNew.js';
 import { postToTelegraph } from '../browser/telegraph/poster.js';
+import { loginToInstagram, closeInstagramBrowser, getInstagramAccountByNickname } from '../browser/instagram/login.js';
+import { postToInstagram } from '../browser/instagram/poster.js';
 import { runXAgent, runXThreadAgent } from '../agents/xAgentNew.js';
 import { xAccountHasCapacity, incrementCount as incrementXCount } from '../config/accountTracker.js';
 import { executeBrowserTool, closeFbSession, closeLiSession } from '../tools/browserTools.js';
@@ -77,6 +79,8 @@ import {
   getRowsNeedingSocialSlot,
   getRowsNeedingLinkedinImagePost,
   saveSocialSlotResult,
+  getRowsNeedingPlatformColumn,
+  savePlatformColumnResult,
   saveLinkedinCarouselResult,
   getRowsForContinuousMediumPosting,
   getRowsForContinuousLinkmatePosting,
@@ -88,20 +92,24 @@ import {
   getRowsForContinuousPatreonPosting,
   getRowsForContinuousNotionPosting,
   getRowsForContinuousNotePosting,
+  getRowsForContinuousVcruPosting,
   getRowsForContinuousNaverPosting,
   getRowsForContinuousVelogPosting,
   getRowsForContinuousCodaPosting,
   getRowsForContinuousPdfhostPosting,
   getRowsForContinuousFourSharedPosting,
   getRowsForContinuousScribdPosting,
+  getRowsForContinuousTistoryPosting,
   getRowsForContinuousMastodonPosting,
   saveUnifiedMastodonResult,
   saveUnifiedPatreonResult,
   saveUnifiedNotionResult,
   saveUnifiedNoteResult,
+  saveUnifiedVcruResult,
   saveUnifiedNaverResult,
   saveUnifiedCodaResult,
   getRowsForContinuousHackmdPosting,
+  getRowsForContinuousTelegraphPosting,
   saveUnifiedSeoData,
   getUrlsDueForRecheck,
   saveWeeklySerpRecheck,
@@ -136,6 +144,8 @@ import { loginToFourShared, closeFourSharedBrowser } from '../browser/fourshared
 import { postToFourShared } from '../browser/fourshared/poster.js';
 import { loginToScribd, closeScribdBrowser } from '../browser/scribd/login.js';
 import { postToScribd } from '../browser/scribd/poster.js';
+import { loginToTistory, closeTistoryBrowser, getTistoryAccountByNickname } from '../browser/tistory/login.js';
+import { postToTistory } from '../browser/tistory/poster.js';
 import fs from 'fs';
 import path from 'path';
 import 'dotenv/config';
@@ -190,6 +200,7 @@ interface BatchCounters {
   patreon: number;
   notion: number;
   note: number;
+  vcru: number;
   naver: number;
   velog: number;
   coda: number;
@@ -204,17 +215,19 @@ interface BatchCounters {
   scribd: number;
   fourshared: number;
   telegraph: number;
+  mataroa: number;
+  tistory: number;
   // legacy field kept for backwards compat
   date?: string;
 }
 
 const ZERO_COUNTERS: BatchCounters = {
   x: 0, fb: 0, tumblr: 0, li: 0, medium: 0, linkmate: 0, googlesite: 0, devto: 0, linkedinpulse: 0,
-  calisthenics: 0, substack: 0, hackmd: 0, patreon: 0, notion: 0, note: 0,
+  calisthenics: 0, substack: 0, hackmd: 0, patreon: 0, notion: 0, note: 0, vcru: 0,
   naver: 0, velog: 0, coda: 0,
   wordpress: 0, blogger: 0, ameba: 0, paragraph: 0,
   pearltrees: 0, pdfhost: 0, instapaper: 0, raindrop: 0,
-  scribd: 0, fourshared: 0, telegraph: 0,
+  scribd: 0, fourshared: 0, telegraph: 0, mataroa: 0, tistory: 0,
 };
 
 // Display order + labels for the daily posting summary (mirrors the reporting sheet layout).
@@ -238,6 +251,7 @@ const PLATFORM_LABELS: [keyof Omit<BatchCounters, 'date'>, string][] = [
   ['substack', 'Substack'],
   ['patreon', 'Patreon'],
   ['note', 'Note'],
+  ['vcru', 'Vc.ru'],
   ['naver', 'Naver'],
   ['velog', 'Velog'],
   ['coda', 'Coda'],
@@ -248,6 +262,8 @@ const PLATFORM_LABELS: [keyof Omit<BatchCounters, 'date'>, string][] = [
   ['scribd', 'Scribd'],
   ['fourshared', '4shared'],
   ['telegraph', 'Telegraph'],
+  ['mataroa', 'Mataroa'],
+  ['tistory', 'Tistory'],
 ];
 
 function getCounters(): BatchCounters {
@@ -451,8 +467,8 @@ async function diagnoseError(
  * Run X batch: pick next unposted rows → generate tweet → post → save
  * SERP check disabled — re-enable by uncommenting runSeoAnalysis calls
  */
-export async function runXBatch(batchNum: number = 1): Promise<void> {
-  const batchUrls = await getRowsNeedingSocialSlot(1, 15);
+export async function runXBatch(batchNum: number = 1, rowsOverride?: SheetRow[]): Promise<void> {
+  const batchUrls = rowsOverride ?? await getRowsNeedingPlatformColumn('X', 15);
 
   if (batchUrls.length === 0) {
     console.log('[X BATCH] No rows available');
@@ -496,25 +512,45 @@ export async function runXBatch(batchNum: number = 1): Promise<void> {
         }
         if (!tweet?.trim()) { console.log(`    ⏭ Skipping — generated content empty`); continue; }
       }
-      const xResult = await runXAgent({ tweetText: tweet, accountHandle: row.name });
+      let xResult = await runXAgent({ tweetText: tweet, accountHandle: row.name, imagePath: row.imagesUrl });
+
+      // The poster throws "TWEET_OVER_LIMIT:<excess>" when X's own character
+      // counter goes negative (its weighted count can differ slightly from
+      // our .length check, e.g. bold-unicode digits) — generateTweet already
+      // supports a tightened re-generation via overLimitBy, but nothing was
+      // ever calling it on this specific failure, so the tweet just failed
+      // outright instead of retrying shorter. Regenerate once and retry.
+      const overLimitMatch = /^TWEET_OVER_LIMIT:(\d+)$/.exec(xResult.error ?? '');
+      if (!xResult.success && overLimitMatch) {
+        const excess = parseInt(overLimitMatch[1], 10);
+        console.log(`    ⚠️  Tweet was ${excess} chars over X's limit — regenerating shorter and retrying...`);
+        try {
+          tweet = await generateTweet({ url: row.targetUrl, title: row.title, seoRanking: 999, priority: row.priority ?? 'P3', marketValue: row.marketValue, overLimitBy: excess });
+          xResult = await runXAgent({ tweetText: tweet, accountHandle: row.name, imagePath: row.imagesUrl });
+        } catch (retryErr: any) {
+          console.log(`    ⚠️  Over-limit retry generation failed: ${retryErr.message}`);
+        }
+      }
 
       // 3. Save result
       if (xResult.success) {
         incrementXCount('x', row.name);
-        await saveSocialSlotResult(row.rowIndex, 1, 'X', {
+        await savePlatformColumnResult(row.rowIndex, 'X', {
           url: xResult.tweetUrl || '',
           status: 'Posted',
           batch: batchLabel,
+          post: tweet,
         });
         posted++;
         recordPost('x');
         console.log(`    ✅ Posted → ${xResult.tweetUrl}`);
       } else {
-        await saveSocialSlotResult(row.rowIndex, 1, 'X', {
+        await savePlatformColumnResult(row.rowIndex, 'X', {
           url: '',
           status: 'Failed',
           error: xResult.error || 'Unknown error',
           batch: batchLabel,
+          post: tweet,
         });
         console.log(`    ❌ Failed: ${xResult.error}`);
       }
@@ -523,11 +559,12 @@ export async function runXBatch(batchNum: number = 1): Promise<void> {
       await applyFix(kbEntry, { platform: 'x', accountName: row.name, rowIndex: row.rowIndex });
       console.error(`  ❌ Row ${row.rowIndex} [${kbEntry.classification}]: ${err.message}`);
       try {
-        await saveSocialSlotResult(row.rowIndex, 1, 'X', {
+        await savePlatformColumnResult(row.rowIndex, 'X', {
           url: '',
           status: 'Error',
           error: err.message,
           batch: batchLabel,
+          post: row.xPost || '',
         });
       } catch (saveErr: any) {
         console.error(`  ⚠️ Row ${row.rowIndex} ALSO FAILED TO SAVE ERROR: ${saveErr.message}`);
@@ -538,13 +575,80 @@ export async function runXBatch(batchNum: number = 1): Promise<void> {
   console.log(`[X BATCH] ${batchLabel} complete: ${posted}/${batchUrls.length} posted`);
 }
 
+// ── Instagram Batch ──────────────────────────────────────────────────────────
+// Reuses the Social Media sheet exactly like LI/X/FB (same "Images URL"
+// local-file-path column LI's image fallback reads), rather than a separate
+// "instagram" tab — Instagram always needs an image, so rows without one are
+// skipped (unlike X, which can post text-only).
+
+async function postToIgAccount(accountName: string, imagePath: string, caption: string): Promise<{ success: boolean; error?: string }> {
+  const account = getInstagramAccountByNickname(accountName);
+  if (!account) return { success: false, error: `Instagram account not found: ${accountName}` };
+  try {
+    const page = await loginToInstagram(account);
+    return await postToInstagram(page, { filePath: imagePath, description: caption });
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  } finally {
+    await closeInstagramBrowser().catch(() => {});
+  }
+}
+
+export async function runInstagramBatch(batchNum: number = 1, rowsOverride?: SheetRow[]): Promise<void> {
+  const allRows = rowsOverride ?? await getRowsNeedingPlatformColumn('Instagram', 15);
+  const rows = allRows.filter(r => (r.imagesUrl || '').trim());
+
+  if (rows.length === 0) {
+    console.log('[INSTAGRAM BATCH] No rows with an image available');
+    return;
+  }
+
+  const batchLabel = `Batch ${batchNum}`;
+  console.log(`\n[INSTAGRAM BATCH] Starting ${batchLabel}...`);
+  console.log(`  Found ${rows.length} rows ready for Instagram posting`);
+  let posted = 0;
+
+  for (const row of rows) {
+    const imagePath = (row.imagesUrl || '').trim();
+    const caption = (row.instagramPost || row.blogCaption || row.title || '').trim();
+    try {
+      console.log(`  Processing: ${row.title.slice(0, 60)}`);
+      const result = await postToIgAccount(row.name, imagePath, caption);
+
+      if (result.success) {
+        await savePlatformColumnResult(row.rowIndex, 'Instagram', {
+          url: '', status: 'Posted', batch: batchLabel, post: caption,
+        });
+        posted++;
+        console.log(`    ✅ Posted`);
+      } else {
+        await savePlatformColumnResult(row.rowIndex, 'Instagram', {
+          url: '', status: 'Failed', error: result.error || 'Unknown error', batch: batchLabel, post: caption,
+        });
+        console.log(`    ❌ Failed: ${result.error}`);
+      }
+    } catch (err: any) {
+      console.error(`  ❌ Row ${row.rowIndex}: ${err.message}`);
+      try {
+        await savePlatformColumnResult(row.rowIndex, 'Instagram', {
+          url: '', status: 'Error', error: err.message, batch: batchLabel, post: caption,
+        });
+      } catch (saveErr: any) {
+        console.error(`  ⚠️ Row ${row.rowIndex} ALSO FAILED TO SAVE ERROR: ${saveErr.message}`);
+      }
+    }
+  }
+
+  console.log(`[INSTAGRAM BATCH] ${batchLabel} complete: ${posted}/${rows.length} posted`);
+}
+
 // ── FB Batch ───────────────────────────────────────────────────────────────────
 
 /**
  * Run FB batch: pick rows → SEO check → generate FB post → post → save all
  */
-export async function runFbBatch(batchNum: number = 1): Promise<void> {
-  const rows = await getRowsNeedingSocialSlot(2, 15);
+export async function runFbBatch(batchNum: number = 1, rowsOverride?: SheetRow[]): Promise<void> {
+  const rows = rowsOverride ?? await getRowsNeedingPlatformColumn('Facebook', 15);
 
   if (rows.length === 0) {
     console.log('[FB BATCH] No rows available');
@@ -710,8 +814,8 @@ async function postToTumblrAccount(accountName: string, postText: string, target
   }
 }
 
-export async function runTumblrBatch(batchNum: number = 1): Promise<void> {
-  const rows = await getRowsNeedingSocialSlot(2, 15);
+export async function runTumblrBatch(batchNum: number = 1, rowsOverride?: SheetRow[]): Promise<void> {
+  const rows = rowsOverride ?? await getRowsNeedingPlatformColumn('Tumblr', 15);
 
   if (rows.length === 0) {
     console.log('[TUMBLR BATCH] No rows available');
@@ -816,8 +920,8 @@ async function postToInstapaperAccount(accountName: string, title: string, targe
   }
 }
 
-export async function runInstapaperBatch(batchNum: number = 1): Promise<void> {
-  const rows = await getRowsNeedingSocialSlot(1, 15);
+export async function runInstapaperBatch(batchNum: number = 1, rowsOverride?: SheetRow[]): Promise<void> {
+  const rows = rowsOverride ?? await getRowsNeedingPlatformColumn('Instapaper', 15);
   if (rows.length === 0) { console.log('[INSTAPAPER BATCH] No rows available'); return; }
 
   const batchLabel = `Batch ${batchNum}`;
@@ -840,12 +944,12 @@ export async function runInstapaperBatch(batchNum: number = 1): Promise<void> {
 
       const postResult = await postToInstapaperAccount(row.name, row.title, row.targetUrl, note);
       if (postResult.success) {
-        await saveSocialSlotResult(row.rowIndex, 1, 'Instapaper', { url: postResult.postUrl || '', status: 'Posted', batch: batchLabel });
+        await savePlatformColumnResult(row.rowIndex, 'Instapaper', { url: postResult.postUrl || '', status: 'Posted', batch: batchLabel, post: note });
         console.log(`    ✅ Posted → ${postResult.postUrl}`);
         recordPost('instapaper');
         posted++;
       } else {
-        await saveSocialSlotResult(row.rowIndex, 1, 'Instapaper', { url: '', status: 'Failed', batch: batchLabel, error: postResult.error });
+        await savePlatformColumnResult(row.rowIndex, 'Instapaper', { url: '', status: 'Failed', batch: batchLabel, error: postResult.error, post: note });
         console.log(`    ❌ Failed: ${postResult.error}`);
         failed++;
       }
@@ -879,8 +983,8 @@ async function postToRaindropAccount(accountName: string, title: string, targetU
   }
 }
 
-export async function runRaindropBatch(batchNum: number = 1): Promise<void> {
-  const rows = await getRowsNeedingSocialSlot(1, 15);
+export async function runRaindropBatch(batchNum: number = 1, rowsOverride?: SheetRow[]): Promise<void> {
+  const rows = rowsOverride ?? await getRowsNeedingPlatformColumn('Raindrop', 15);
   if (rows.length === 0) { console.log('[RAINDROP BATCH] No rows available'); return; }
 
   const batchLabel = `Batch ${batchNum}`;
@@ -903,12 +1007,12 @@ export async function runRaindropBatch(batchNum: number = 1): Promise<void> {
 
       const postResult = await postToRaindropAccount(row.name, row.title, row.targetUrl, note);
       if (postResult.success) {
-        await saveSocialSlotResult(row.rowIndex, 1, 'Raindrop', { url: postResult.postUrl || '', status: 'Posted', batch: batchLabel });
+        await savePlatformColumnResult(row.rowIndex, 'Raindrop', { url: postResult.postUrl || '', status: 'Posted', batch: batchLabel, post: note });
         console.log(`    ✅ Posted → ${postResult.postUrl}`);
         recordPost('raindrop');
         posted++;
       } else {
-        await saveSocialSlotResult(row.rowIndex, 1, 'Raindrop', { url: '', status: 'Failed', batch: batchLabel, error: postResult.error });
+        await savePlatformColumnResult(row.rowIndex, 'Raindrop', { url: '', status: 'Failed', batch: batchLabel, error: postResult.error, post: note });
         console.log(`    ❌ Failed: ${postResult.error}`);
         failed++;
       }
@@ -942,8 +1046,8 @@ async function postToPearltreesAccount(accountName: string, title: string, targe
   }
 }
 
-export async function runPearltreesBatch(batchNum: number = 1): Promise<void> {
-  const rows = await getRowsNeedingSocialSlot(2, 15);
+export async function runPearltreesBatch(batchNum: number = 1, rowsOverride?: SheetRow[]): Promise<void> {
+  const rows = rowsOverride ?? await getRowsNeedingPlatformColumn('Pearltrees', 15);
   if (rows.length === 0) { console.log('[PEARLTREES BATCH] No rows available'); return; }
 
   const batchLabel = `Batch ${batchNum}`;
@@ -955,12 +1059,12 @@ export async function runPearltreesBatch(batchNum: number = 1): Promise<void> {
       console.log(`\n  Processing: ${row.title.slice(0, 60)}`);
       const postResult = await postToPearltreesAccount(row.name, row.title, row.targetUrl);
       if (postResult.success) {
-        await saveSocialSlotResult(row.rowIndex, 2, 'Pearltrees', { url: postResult.postUrl || '', status: 'Posted', batch: batchLabel });
+        await savePlatformColumnResult(row.rowIndex, 'Pearltrees', { url: postResult.postUrl || '', status: 'Posted', batch: batchLabel });
         console.log(`    ✅ Posted → ${postResult.postUrl}`);
         recordPost('pearltrees');
         posted++;
       } else {
-        await saveSocialSlotResult(row.rowIndex, 2, 'Pearltrees', { url: '', status: 'Failed', batch: batchLabel, error: postResult.error });
+        await savePlatformColumnResult(row.rowIndex, 'Pearltrees', { url: '', status: 'Failed', batch: batchLabel, error: postResult.error });
         console.log(`    ❌ Failed: ${postResult.error}`);
         failed++;
       }
@@ -1040,12 +1144,14 @@ export async function runMastodonBatch(batchNum: number = 1): Promise<void> {
 // ── Telegraph Batch ──────────────────────────────────────────────────────────
 // No accounts, no login — telegra.ph opens straight into a live editor and
 // Publish mints the page instantly (confirmed live 2026-09-08, see
-// browser/telegraph/poster.ts). Shares Slot 2 of the Social Media tab with
-// Facebook/Tumblr/Pearltrees (see saveSocialSlotResult) — same
-// "Social Platform 2"/"Social URL 2" columns, no dedicated Telegraph columns.
+// browser/telegraph/poster.ts). Telegraph is a long-form BLOG platform, not
+// social media (fixed 2026-09-21) — it now shares New Logic Slot 3 with
+// Dev.to/WordPress/HackMD/4shared (see saveSlotResult / getRowsNeedingSlot),
+// posting the row's real blogContent instead of the Social Media tab's
+// short-form fallback stub.
 
 export async function runTelegraphBatch(batchNum: number = 1): Promise<void> {
-  const rows = await getRowsNeedingSocialSlot(2, 15);
+  const rows = await getRowsForContinuousTelegraphPosting(15);
   if (rows.length === 0) { console.log('[TELEGRAPH BATCH] No rows available'); return; }
 
   const batchLabel = `Batch ${batchNum}`;
@@ -1062,7 +1168,7 @@ export async function runTelegraphBatch(batchNum: number = 1): Promise<void> {
       console.log(`    Posting to Telegraph...`);
       const page = await postToTelegraph(title, 'Ken Research', html);
 
-      await saveSocialSlotResult(row.rowIndex, 2, 'Telegraph', { url: page.url, status: 'Posted', batch: batchLabel });
+      await saveSlotResult(row.rowIndex, 3, 'Telegraph', { url: page.url, status: 'Posted', batch: batchLabel });
       recordPost('telegraph');
       console.log(`    ✅ Posted → ${page.url}`);
       posted++;
@@ -1070,7 +1176,7 @@ export async function runTelegraphBatch(batchNum: number = 1): Promise<void> {
       const kbEntry = recordError({ rawError: err.message, platform: 'telegraph', stage: 'post', rowIndex: row.rowIndex, rowTitle: row.title, batchRun: batchNum });
       console.error(`  ❌ Row ${row.rowIndex} [${kbEntry.classification}]: ${err.message}`);
       try {
-        await saveSocialSlotResult(row.rowIndex, 2, 'Telegraph', { url: '', status: 'Failed', batch: batchLabel, error: err.message });
+        await saveSlotResult(row.rowIndex, 3, 'Telegraph', { url: '', status: 'Failed', batch: batchLabel, error: err.message });
       } catch (saveErr: any) {
         console.error(`  ⚠️ Row ${row.rowIndex} SHEET SAVE ALSO FAILED: ${saveErr.message}`);
       }
@@ -1164,8 +1270,8 @@ export async function runScribdBatch(batchNum: number = 1): Promise<void> {
 
 // ── 4shared Batch ─────────────────────────────────────────────────────────────
 
-export async function runFourSharedBatch(batchNum: number = 1): Promise<void> {
-  const rows = await getRowsForContinuousFourSharedPosting(15);
+export async function runFourSharedBatch(batchNum: number = 1, rowsOverride?: SheetRow[]): Promise<void> {
+  const rows = rowsOverride ?? await getRowsForContinuousFourSharedPosting(15);
   if (rows.length === 0) { console.log('[4SHARED BATCH] No rows available'); return; }
 
   const batchLabel = `Batch ${batchNum}`;
@@ -1203,21 +1309,84 @@ export async function runFourSharedBatch(batchNum: number = 1): Promise<void> {
   console.log(`\n[4SHARED BATCH] ${batchLabel} complete: ${posted}/${rows.length} posted, ${failed} failed`);
 }
 
+// ── Tistory Batch ─────────────────────────────────────────────────────────────
+// Shares slot 3 of the New Logic 3-slot system with HackMD, WordPress, and
+// Dev.to (see getRowsForContinuousTistoryPosting / saveSlotResult).
+export async function runTistoryBatch(batchNum: number = 1, rowsOverride?: SheetRow[]): Promise<void> {
+  const rows = rowsOverride ?? await getRowsForContinuousTistoryPosting(15);
+  if (rows.length === 0) { console.log('[TISTORY BATCH] No rows available'); return; }
+
+  const batchLabel = `Batch ${batchNum}`;
+  console.log(`\n[TISTORY BATCH] Starting ${batchLabel}... Found ${rows.length} rows`);
+
+  let posted = 0, failed = 0;
+  for (const row of rows) {
+    const title = row.title || row.descriptionTitle || '';
+    const content = row.blogContent || '';
+    if (!content) {
+      console.log(`  ⏭ Skipping row ${row.rowIndex} — no blog content`);
+      await saveSlotResult(row.rowIndex, 3, 'Tistory', { url: '', status: 'Failed', batch: batchLabel, error: 'No blog content' });
+      failed++;
+      continue;
+    }
+
+    const account = getTistoryAccountByNickname(row.name);
+    if (!account) {
+      console.log(`  ⏭ Skipping row ${row.rowIndex} — no active Tistory account for "${row.name}"`);
+      await saveSlotResult(row.rowIndex, 3, 'Tistory', { url: '', status: 'Failed', batch: batchLabel, error: `No active Tistory account for "${row.name}"` });
+      failed++;
+      continue;
+    }
+
+    try {
+      const finalContent = ensureTargetUrl(content, row.targetUrl);
+      const page = await loginToTistory(row.name);
+      // blogName is optional — postToTistory falls back to whichever blog
+      // this account's own "글쓰기" link points at when it isn't set.
+      const r = await postToTistory(page, { blogName: account.blogName, title, content: finalContent });
+      if (r.success) {
+        await saveSlotResult(row.rowIndex, 3, 'Tistory', { url: r.postUrl || '', status: 'Posted', batch: batchLabel });
+        console.log(`  ✅ Posted → ${r.postUrl}`);
+        recordPost('tistory');
+        posted++;
+      } else {
+        await saveSlotResult(row.rowIndex, 3, 'Tistory', { url: '', status: 'Failed', batch: batchLabel, error: r.error });
+        console.error(`  ❌ Row ${row.rowIndex}: ${r.error}`);
+        failed++;
+      }
+    } catch (err: any) {
+      const kbEntry = recordError({ rawError: err.message, platform: 'tistory', stage: 'post', rowIndex: row.rowIndex, rowTitle: row.title, batchRun: batchNum });
+      await applyFix(kbEntry, { platform: 'tistory', accountName: row.name, rowIndex: row.rowIndex });
+      await saveSlotResult(row.rowIndex, 3, 'Tistory', { url: '', status: 'Failed', batch: batchLabel, error: err.message });
+      console.error(`  ❌ Row ${row.rowIndex} [${kbEntry.classification}]: ${err.message}`);
+      failed++;
+    } finally {
+      await closeTistoryBrowser();
+    }
+    await new Promise(r => setTimeout(r, 1000));
+  }
+  console.log(`\n[TISTORY BATCH] ${batchLabel} complete: ${posted}/${rows.length} posted, ${failed} failed`);
+}
+
 // ── LI Batch ───────────────────────────────────────────────────────────────────
 
 /**
  * Run LI batch: pick rows → SEO check → generate LI post → post → save all
  */
-export async function runLiBatch(options?: { manual?: boolean }, batchNum: number = 1): Promise<void> {
-  // Image-post rows come from a dedicated query — eligible when "Images URL"
-  // (col E) has a path AND "LinkedinCrousel" (col F) is still empty (that
-  // column filling in on success is what marks a row done, so it can't be
-  // re-picked). These must finish first, before any normal text posts.
-  const imageRows = await getRowsNeedingLinkedinImagePost(15);
-  const normalRows = await getRowsNeedingSocialSlot(1, 15);
-
-  const imageRowIndexes = new Set(imageRows.map(r => r.rowIndex));
-  const rows = [...imageRows, ...normalRows.filter(r => !imageRowIndexes.has(r.rowIndex))];
+export async function runLiBatch(options?: { manual?: boolean }, batchNum: number = 1, rowsOverride?: SheetRow[]): Promise<void> {
+  // Image-post rows come from a dedicated query — eligible when "7Slide"
+  // (col H) has a path AND "LinkedIn Status" is still empty (that column
+  // filling in on success or failure is what marks a row done, so it can't
+  // be re-picked). These must finish first, before any normal text posts.
+  let rows: SheetRow[];
+  if (rowsOverride) {
+    rows = rowsOverride;
+  } else {
+    const imageRows = await getRowsNeedingLinkedinImagePost(15);
+    const normalRows = await getRowsNeedingPlatformColumn('LinkedIn', 15);
+    const imageRowIndexes = new Set(imageRows.map(r => r.rowIndex));
+    rows = [...imageRows, ...normalRows.filter(r => !imageRowIndexes.has(r.rowIndex))];
+  }
 
   if (rows.length === 0) {
     console.log('[LI BATCH] No rows available');
@@ -1270,44 +1439,40 @@ export async function runLiBatch(options?: { manual?: boolean }, batchNum: numbe
       liPost = injectUTM(liPost, UTM_PARAMS.LinkedIn);
       row.linkedinPost = liPost;
 
-      // 4. Post to LI — image post if a locally-saved image path is present
-      // (column E / "Images URL"), else the normal text post. The two paths
-      // write their result URL to different places: normal → Social URL
-      // slot (as always), image → the "LinkedinCarousel" column (F).
-      const imagePath = (row.imagesUrl || '').trim();
+      // 4. Post to LI — prefer the 7-slide carousel PDF (column H /
+      // "7Slide") when it's there; if that's blank, fall back to the
+      // single cover image in "Images URL" (same column X's own image
+      // posting reads); only fall back to a plain text post if neither
+      // exists. All three write their result URL to the same place either
+      // way — normal → its own dedicated LinkedIn columns (as always),
+      // either image path → the "LinkedinCarousel" column (F).
+      const sevenSlidePath = (row.sevenSlide || '').trim();
+      const imagePath = sevenSlidePath || (row.imagesUrl || '').trim();
       console.log(`    Posting to LI (account: ${row.name})${imagePath ? ' [IMAGE]' : ''}...`);
       const postResult = imagePath
-        ? await postToLiAccountImage(row.name, liPost, imagePath)
+        ? await postToLiAccountImage(row.name, liPost, imagePath, row.title)
         : await postToLiAccount(row.name, liPost);
 
       if (postResult.success) {
         liPost = postResult.postText || liPost;
         row.linkedinPost = liPost;
-        if (imagePath) {
-          await saveLinkedinCarouselResult(row.rowIndex, { postUrl: postResult.postUrl || '', status: 'Posted' });
-        } else {
-          await saveLiBatchResult(row, {
-            liPost,
-            liPostUrl: postResult.postUrl || '',
-            liStatus: 'Posted',
-            liBatch: batchLabel,
-          });
-        }
+        await saveLiBatchResult(row, {
+          liPost,
+          liPostUrl: postResult.postUrl || '',
+          liStatus: 'Posted',
+          liBatch: batchLabel,
+        });
         recordPost('li');
         console.log(`    ✅ Posted → ${postResult.postUrl}`);
         posted++;
       } else {
-        if (imagePath) {
-          await saveLinkedinCarouselResult(row.rowIndex, { postUrl: '', status: 'Failed', error: postResult.error });
-        } else {
-          await saveLiBatchResult(row, {
-            liPost,
-            liPostUrl: '',
-            liStatus: 'Failed',
-            liBatch: row.liBatch || '',
-            liError: postResult.error,
-          });
-        }
+        await saveLiBatchResult(row, {
+          liPost,
+          liPostUrl: '',
+          liStatus: 'Failed',
+          liBatch: batchLabel,
+          liError: postResult.error,
+        });
         console.log(`    ❌ Failed: ${postResult.error}`);
         failed++;
       }
@@ -1318,17 +1483,13 @@ export async function runLiBatch(options?: { manual?: boolean }, batchNum: numbe
       await applyFix(kbEntry, { platform: 'linkedin', accountName: row.name, rowIndex: row.rowIndex });
       console.error(`  ❌ Row ${row.rowIndex} [${kbEntry.classification}]: ${err.message}`);
       try {
-        if ((row.imagesUrl || '').trim()) {
-          await saveLinkedinCarouselResult(row.rowIndex, { postUrl: '', status: 'Error', error: err.message });
-        } else {
-          await saveLiBatchResult(row, {
-            liPost: row.linkedinPost || '',
-            liPostUrl: '',
-            liStatus: 'Error',
-            liBatch: row.liBatch || '',
-            liError: err.message,
-          });
-        }
+        await saveLiBatchResult(row, {
+          liPost: row.linkedinPost || '',
+          liPostUrl: '',
+          liStatus: 'Error',
+          liBatch: batchLabel,
+          liError: err.message,
+        });
       } catch (saveErr: any) {
         console.error(`  ⚠️ Row ${row.rowIndex} SHEET SAVE ALSO FAILED: ${saveErr.message}`);
       }
@@ -1373,7 +1534,7 @@ async function postToLiAccount(accountName: string, postText: string): Promise<{
 }
 
 // Helper: Post to single LI account with a single locally-saved image
-async function postToLiAccountImage(accountName: string, postText: string, imagePath: string): Promise<{
+async function postToLiAccountImage(accountName: string, postText: string, imagePath: string, docTitle?: string): Promise<{
   success: boolean;
   postUrl?: string;
   postText?: string;
@@ -1389,9 +1550,16 @@ async function postToLiAccountImage(accountName: string, postText: string, image
       return { success: false, error: loginResult.error || 'LinkedIn login failed' };
     }
 
+    // 6 min, not 3 — the document (PDF) path's "Done" button poll alone can
+    // take up to 2 min for LinkedIn to finish converting a multi-page PDF,
+    // plus ~30-40s of earlier composer steps. Confirmed live 2026-09-22:
+    // the old 3-min budget fired this same withTimeout's own closeLiSession
+    // mid-poll, killing the browser out from under a post that was still
+    // legitimately in progress (not stuck) — a self-inflicted failure, not
+    // a real hang.
     const postResult = await withTimeout(
-      executeBrowserTool('post_linkedin_image', { nickname: accountName, postText, imagePath }),
-      3 * 60 * 1000, `LI image post:${accountName}`,
+      executeBrowserTool('post_linkedin_image', { nickname: accountName, postText, imagePath, docTitle }),
+      6 * 60 * 1000, `LI image post:${accountName}`,
       () => closeLiSession(accountName)
     );
     return {
@@ -2436,20 +2604,19 @@ function getHackMDApiKey(nickname?: string): string | null {
 
 // ── Save helpers with batch column ──────────────────────────────────────────────
 
-// Facebook, Tumblr, LinkedIn now share the Social Media tab's slot columns
-// (see saveSocialSlotResult) instead of their own dedicated Fb/Tumblr/LI
-// columns — Facebook+Tumblr+Pearltrees share slot 2, LinkedIn+X+Instapaper+
-// Raindrop share slot 1. Only url/status/error/batch are tracked per slot
-// (no post-body-text column), matching the New Logic slot pattern.
+// Facebook, Tumblr, LinkedIn each write into their own dedicated columns
+// (Post / Post URL / Status / Error / Batch / lastPosted) via
+// savePlatformColumnResult — see PLATFORM_COLUMNS in sheets.ts.
 async function saveFbBatchResult(
   row: SheetRow,
   data: { fbPost: string; fbPostUrl: string; fbStatus: string; fbBatch: string; fbError?: string }
 ): Promise<void> {
-  await saveSocialSlotResult(row.rowIndex, 2, 'Facebook', {
+  await savePlatformColumnResult(row.rowIndex, 'Facebook', {
     url: data.fbPostUrl,
     status: data.fbStatus,
     error: data.fbError || '',
     batch: data.fbBatch,
+    post: data.fbPost,
   });
 }
 
@@ -2457,11 +2624,12 @@ async function saveTumblrBatchResult(
   row: SheetRow,
   data: { tumblrPost: string; tumblrPostUrl: string; tumblrStatus: string; tumblrBatch: string; tumblrError?: string }
 ): Promise<void> {
-  await saveSocialSlotResult(row.rowIndex, 2, 'Tumblr', {
+  await savePlatformColumnResult(row.rowIndex, 'Tumblr', {
     url: data.tumblrPostUrl,
     status: data.tumblrStatus,
     error: data.tumblrError || '',
     batch: data.tumblrBatch,
+    post: data.tumblrPost,
   });
 }
 
@@ -2469,10 +2637,11 @@ async function saveLiBatchResult(
   row: SheetRow,
   data: { liPost: string; liPostUrl: string; liStatus: string; liBatch: string; liError?: string }
 ): Promise<void> {
-  await saveSocialSlotResult(row.rowIndex, 1, 'LinkedIn', {
+  await savePlatformColumnResult(row.rowIndex, 'LinkedIn', {
     url: data.liPostUrl,
     status: data.liStatus,
     error: data.liError || '',
+    post: data.liPost,
     batch: data.liBatch,
   });
 }
@@ -2763,6 +2932,48 @@ export async function runNoteBatch(batchNum: number = 1): Promise<void> {
   console.log(`\n[NOTE BATCH] ${batchLabel} complete: ${posted}/${rows.length} posted, ${failed} failed`);
 }
 
+// ──── vc.ru Batch ────────────────────────────────────────────────────────────────
+
+export async function runVcruBatch(batchNum: number = 1): Promise<void> {
+  console.log(`\n[VCRU BATCH] Starting...`);
+  const rows = await getRowsForContinuousVcruPosting(15);
+  if (rows.length === 0) { console.log('[VCRU BATCH] No rows available'); return; }
+  const batchLabel = `Batch ${batchNum}`;
+  console.log(`  Found ${rows.length} rows ready for vc.ru (${batchLabel})`);
+  let posted = 0, failed = 0;
+  for (const row of rows) {
+    try {
+      console.log(`\n  Processing: ${row.title.slice(0, 60)}`);
+      let content = await generateVcruPost(row).catch(() => '');
+      const title = row.title || row.descriptionTitle || '';
+      if (!content) {
+        await saveUnifiedVcruResult(row, { postUrl: '', status: 'Failed', batch: batchLabel, error: 'No blog content' });
+        failed++;
+        continue;
+      }
+      content = ensureTargetUrl(content, row.targetUrl);
+      const loginResult = await executeBrowserTool('login_vcru', { nickname: row.name });
+      if (!loginResult.success) throw new Error(loginResult.error || 'Login failed');
+      const postResult = await executeBrowserTool('post_vcru', { title, htmlContent: content });
+      if (postResult.success) {
+        await saveUnifiedVcruResult(row, { postUrl: postResult.postUrl || '', status: 'Posted', batch: batchLabel });
+        recordPost('vcru');
+        console.log(`    ✅ Posted → ${postResult.postUrl}`);
+        posted++;
+      } else {
+        await saveUnifiedVcruResult(row, { postUrl: '', status: 'Failed', batch: batchLabel, error: postResult.error });
+        failed++;
+      }
+    } catch (err: any) {
+      console.error(`  ❌ Row ${row.rowIndex}: ${err.message}`);
+      try { await saveUnifiedVcruResult(row, { postUrl: '', status: 'Error', batch: batchLabel, error: err.message }); } catch {}
+      failed++;
+    }
+    await new Promise(r => setTimeout(r, 1000));
+  }
+  console.log(`\n[VCRU BATCH] ${batchLabel} complete: ${posted}/${rows.length} posted, ${failed} failed`);
+}
+
 // ──── Naver Batch ──────────────────────────────────────────────────────────────
 
 export async function runNaverBatch(batchNum: number = 1, rowsOverride?: SheetRow[]): Promise<void> {
@@ -2944,9 +3155,66 @@ export async function runAmebaBatch(batchNum: number = 1): Promise<void> {
   console.log(`\n[AMEBA BATCH] ${batchLabel} complete: ${posted}/${rows.length} posted, ${failed} failed`);
 }
 
+// ── Mataroa Batch ─────────────────────────────────────────────────────────────
+// Pure REST API — no browser/login step at all. Shares New Logic Slot 1
+// ("Blog Platform 1"/"Blog URL 1") with Linkmate, Blogger, Coda, Medium and
+// Velog — a row only reaches Mataroa if none of those already claimed slot 1
+// for it today. Account is picked by matching the row's assigned nickname
+// (from the 25-name roster) against .accounts/accounts-mataroa.json, same
+// convention every browser-based platform uses for its own account files.
+
+export async function runMataroaBatch(batchNum: number = 1): Promise<void> {
+  const { getRowsForContinuousMataroaPosting, saveSlotResult } = await import('../sheets/sheets.js');
+  const { postToMataroaApi, getMataroaAccountByNickname } = await import('../browser/mataroa/apiPoster.js');
+
+  const rows = await getRowsForContinuousMataroaPosting(15);
+  if (rows.length === 0) { console.log('[MATAROA BATCH] No rows available'); return; }
+
+  const batchLabel = `Batch ${batchNum}`;
+  console.log(`\n[MATAROA BATCH] Starting ${batchLabel}...`);
+  console.log(`  Found ${rows.length} rows ready for Mataroa posting`);
+  let posted = 0, failed = 0;
+
+  for (const row of rows) {
+    try {
+      console.log(`\n  Processing: ${row.title.slice(0, 60)}`);
+      let content = row.blogContent || '';
+      const title = row.title || row.descriptionTitle || '';
+      if (!content) {
+        await saveSlotResult(row.rowIndex, 1, 'Mataroa', { url: '', status: 'Failed', batch: batchLabel, error: 'No blog content' });
+        failed++;
+        continue;
+      }
+      content = ensureTargetUrl(content, row.targetUrl);
+
+      const account = getMataroaAccountByNickname(row.name || '');
+      if (!account) {
+        throw new Error(`No Mataroa account found for nickname "${row.name}"`);
+      }
+
+      const result = await postToMataroaApi(account.apiKey, title, content);
+      if (result.success) {
+        await saveSlotResult(row.rowIndex, 1, 'Mataroa', { url: result.postUrl || '', status: 'Posted', batch: batchLabel });
+        recordPost('mataroa');
+        console.log(`    ✅ Posted → ${result.postUrl}`);
+        posted++;
+      } else {
+        await saveSlotResult(row.rowIndex, 1, 'Mataroa', { url: '', status: 'Failed', batch: batchLabel, error: result.error });
+        failed++;
+      }
+    } catch (err: any) {
+      console.error(`  ❌ Row ${row.rowIndex}: ${err.message}`);
+      try { await saveSlotResult(row.rowIndex, 1, 'Mataroa', { url: '', status: 'Error', batch: batchLabel, error: err.message }); } catch {}
+      failed++;
+    }
+    await new Promise(r => setTimeout(r, 500));
+  }
+  console.log(`\n[MATAROA BATCH] ${batchLabel} complete: ${posted}/${rows.length} posted, ${failed} failed`);
+}
+
 // ── Retry single row on a specific platform ───────────────────────────────────
 
-const BLOG_PLATFORMS  = ['googlesite', 'hackmd', 'devto', 'medium', 'linkmate', 'linkedin-pulse', 'calisthenics', 'substack', 'wordpress', 'blogger', 'patreon', 'notion', 'note', 'naver', 'velog', 'coda'];
+const BLOG_PLATFORMS  = ['googlesite', 'hackmd', 'devto', 'medium', 'linkmate', 'linkedin-pulse', 'calisthenics', 'substack', 'wordpress', 'blogger', 'patreon', 'notion', 'note', 'vcru', 'naver', 'velog', 'coda', 'mataroa', 'telegraph'];
 const SOCIAL_PLATFORMS = ['x', 'facebook', 'linkedin'];
 
 // Verified against each platform's real getRowsForContinuousXPosting() in
@@ -3119,8 +3387,16 @@ export async function runRetryRow(rowIndex: number, platform: string): Promise<v
         let tweet = row.xPost?.trim() || '';
         if (!tweet) tweet = await generateTweet({ url: row.targetUrl, title: row.title, seoRanking: 999, priority: row.priority ?? 'P3', marketValue: row.marketValue });
         if (!tweet?.trim()) { console.log('⏭ Skipping — no content'); break; }
-        const r = await runXAgent({ tweetText: tweet, accountHandle: row.name });
-        await saveSocialSlotResult(row.rowIndex, 1, 'X', { url: r.tweetUrl || '', status: r.success ? 'Posted' : 'Failed', error: r.error || '', batch: label });
+        let r = await runXAgent({ tweetText: tweet, accountHandle: row.name });
+        // Same over-limit retry as runXBatch above.
+        const overLimitMatch = /^TWEET_OVER_LIMIT:(\d+)$/.exec(r.error ?? '');
+        if (!r.success && overLimitMatch) {
+          const excess = parseInt(overLimitMatch[1], 10);
+          console.log(`⚠️  Tweet was ${excess} chars over X's limit — regenerating shorter and retrying...`);
+          tweet = await generateTweet({ url: row.targetUrl, title: row.title, seoRanking: 999, priority: row.priority ?? 'P3', marketValue: row.marketValue, overLimitBy: excess });
+          r = await runXAgent({ tweetText: tweet, accountHandle: row.name });
+        }
+        await savePlatformColumnResult(row.rowIndex, 'X', { url: r.tweetUrl || '', status: r.success ? 'Posted' : 'Failed', error: r.error || '', batch: label, post: tweet });
         console.log(r.success ? `✅ Posted → ${r.tweetUrl}` : `❌ Failed: ${r.error}`);
         break;
       }
@@ -3150,16 +3426,13 @@ export async function runRetryRow(rowIndex: number, platform: string): Promise<v
           liPost = await generateLiPost({ url: row.targetUrl, title: row.title, seoRanking: 1, priority: 'P1' });
         }
         if (!liPost?.trim()) { console.log('⏭ Skipping — no content'); break; }
-        const liImagePath = (row.imagesUrl || '').trim();
+        // Same 7Slide -> Images URL -> text fallback as runLiBatch above.
+        const liImagePath = (row.sevenSlide || '').trim() || (row.imagesUrl || '').trim();
         const r = liImagePath
-          ? await postToLiAccountImage(row.name, liPost, liImagePath)
+          ? await postToLiAccountImage(row.name, liPost, liImagePath, row.title)
           : await postToLiAccount(row.name, liPost);
         liPost = r.postText || liPost;
-        if (liImagePath) {
-          await saveLinkedinCarouselResult(row.rowIndex, { postUrl: r.postUrl || '', status: r.success ? 'Posted' : 'Failed', error: r.error });
-        } else {
-          await saveLiBatchResult(row, { liPost, liPostUrl: r.postUrl || '', liStatus: r.success ? 'Posted' : 'Failed', liBatch: label, liError: r.error });
-        }
+        await saveLiBatchResult(row, { liPost, liPostUrl: r.postUrl || '', liStatus: r.success ? 'Posted' : 'Failed', liBatch: label, liError: r.error });
         console.log(r.success ? `✅ Posted → ${r.postUrl}` : `❌ Failed: ${r.error}`);
         break;
       }
@@ -3356,6 +3629,34 @@ export async function saveNoteSession(nickname: string): Promise<void> {
 
   } catch (err: any) {
     console.error(`❌ Error saving Note session: ${err.message}\n`);
+  }
+}
+
+// ── Save vc.ru Session ───────────────────────────────────────────────────────
+
+export async function saveVcruSession(nickname: string): Promise<void> {
+  try {
+    console.log(`\n📝 Saving vc.ru session for: ${nickname}\n`);
+
+    const { loginToVcru, getVcruAccountByNickname } = await import('../browser/vcru/login.js');
+
+    const account = getVcruAccountByNickname(nickname);
+    if (!account) {
+      console.error(`❌ Account not found: ${nickname}`);
+      return;
+    }
+
+    console.log(`🔐 Email: ${account.email}`);
+    console.log(`\n🌐 Opening browser — complete login then press Y + Enter...\n`);
+
+    await loginToVcru({ nickname });
+
+    console.log(`\n✅ Login detected!`);
+    console.log(`✅ Session saved to .sessions/vcru/`);
+    console.log(`\n✅ You can now run vc.ru batches without re-login.\n`);
+
+  } catch (err: any) {
+    console.error(`❌ Error saving vc.ru session: ${err.message}\n`);
   }
 }
 

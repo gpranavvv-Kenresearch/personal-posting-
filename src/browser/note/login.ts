@@ -45,19 +45,6 @@ export async function closeNoteBrowser(): Promise<void> {
   browserContext = null;
 }
 
-async function isAlreadyLoggedIn(page: Page): Promise<boolean> {
-  try {
-    await page.goto('https://note.com/', { waitUntil: 'domcontentloaded', timeout: 30000 });
-    await sleep(2000);
-    const url = page.url();
-    if (url.includes('/login')) return false;
-    const loggedInEl = await page.$('a[href*="/notes/new"], button[data-testid="header-post-button"], a[href*="/settings"]');
-    return !!loggedInEl;
-  } catch {
-    return false;
-  }
-}
-
 export async function loginToNote(options?: {
   email?: string;
   password?: string;
@@ -71,8 +58,7 @@ export async function loginToNote(options?: {
     throw new Error(`Note account "${options.nickname}" not found in ${NOTE_ACCOUNTS_FILE}`);
   }
 
-  const email    = options?.email    || account?.email    || process.env.NOTE_EMAIL    || '';
-  const password = options?.password || account?.password || process.env.NOTE_PASSWORD || '';
+  const email = options?.email || account?.email || process.env.NOTE_EMAIL || '';
 
   const chromePath = process.env.CHROME_PATH || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
   const sessionDir = account?.sessionDir ? path.resolve(account.sessionDir) : sessionDirFor(email);
@@ -132,41 +118,12 @@ export async function loginToNote(options?: {
     page = await browserContext.newPage();
   }
 
-  // Check saved session
-  console.log('   Checking saved session...');
-  const loggedIn = await isAlreadyLoggedIn(page);
-  if (loggedIn) {
-    console.log('   ✅ Already logged in to Note via saved session');
-    return page;
-  }
-
-  // Open login page — user completes via Google
-  console.log('   Opening Note login page...');
-  await page.goto('https://note.com/login', { waitUntil: 'domcontentloaded', timeout: 30000 });
-  await sleep(2000);
-
-  // Auto-fill email+password only if credentials provided
-  if (email && password) {
-    await page.fill('input[name="email"]', email).catch(() =>
-      page.fill('input[type="email"]', email)
-    );
-    await sleep(500);
-    await page.fill('input[name="password"]', password).catch(() =>
-      page.fill('input[type="password"]', password)
-    );
-    await sleep(500);
-    await page.keyboard.press('Enter');
-    await sleep(4000);
-
-    const loginSucceeded = await isAlreadyLoggedIn(page);
-    if (loginSucceeded) {
-      console.log('   ✅ Login successful');
-      return page;
-    }
-  }
-
-  // Wait for manual login (Google OAuth or OTP)
-  console.log(`   👉 Login with Google in the browser window...`);
+  // Trust the saved session profile — no login-state check, no /login
+  // fallback. Just open note.com, give it a moment to settle, and hand the
+  // page straight to the automation.
+  console.log('   Opening note.com with saved session...');
+  await page.goto('https://note.com/', { waitUntil: 'domcontentloaded', timeout: 30000 });
+  await sleep(3000 + Math.floor(Math.random() * 1000));
   return page;
 }
 

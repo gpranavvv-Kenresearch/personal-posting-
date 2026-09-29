@@ -37,12 +37,12 @@ function sessionDirFor(email: string): string {
   console.log(`Session folder: ${sessionDir}`);
 
   const ctx: BrowserContext = await chromium.launchPersistentContext(sessionDir, {
-    headless: true,
+    headless: false,
     executablePath: chromePath,
     viewport: { width: 1280, height: 800 },
     slowMo: 80,
     ignoreDefaultArgs: ['--enable-automation'],
-    args: ['--start-minimized', '--disable-blink-features=AutomationControlled', '--no-first-run', '--disable-infobars'],
+    args: ['--disable-blink-features=AutomationControlled', '--no-first-run', '--disable-infobars'],
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
   });
 

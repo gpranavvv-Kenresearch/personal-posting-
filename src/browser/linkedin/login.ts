@@ -9,6 +9,11 @@ const LINKEDIN_ACCOUNTS_FILE = '.accounts/linkedin-accounts.json';
 const SESSION_ROOT = path.resolve('li-sessions');
 const CHROME_PATH = process.env.CHROME_PATH || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
 const MANUAL_LOGIN_TIMEOUT_MS = 30_000;
+// A real "type in credentials, solve a checkpoint" login needs much longer
+// than the 30s fallback above (which only exists to catch a slow render
+// after an auto-fill attempt that already ran) — used only when there are
+// no saved credentials at all, i.e. onboarding a brand-new account.
+const ONBOARDING_LOGIN_TIMEOUT_MS = 5 * 60_000;
 
 fs.mkdirSync(SESSION_ROOT, { recursive: true });
 
@@ -45,7 +50,7 @@ const randomDelay = (min = 500, max = 1400) =>
 
 // ── 2FA detection ───────────────────────────────────────────────────────────
 
-async function detectTwoFactorBlock(page: Page, username: string): Promise<boolean> {
+async function detectTwoFactorBlock(page: Page, username?: string): Promise<boolean> {
   try {
     const url = (page.url() || '').toLowerCase();
     if (
@@ -76,7 +81,7 @@ async function detectTwoFactorBlock(page: Page, username: string): Promise<boole
 
 // ── Login helper ────────────────────────────────────────────────────────────
 
-async function ensureLoggedIn(page: Page, email: string, password: string): Promise<boolean> {
+async function ensureLoggedIn(page: Page, email?: string, password?: string): Promise<boolean> {
   try {
     await page.goto('https://www.linkedin.com/feed/', { waitUntil: 'domcontentloaded' });
     // domcontentloaded fires before the nav bar has actually rendered — a
@@ -105,18 +110,32 @@ async function ensureLoggedIn(page: Page, email: string, password: string): Prom
       return true;
     }
 
-    if (!email || !password) {
-      console.error(`   ❌ Credentials missing for ${email || 'unknown account'}`);
-      return false;
-    }
-
-    // ── Auto-login attempt ──────────────────────────────────────────────────
-    console.log(`   🔐 ${email}: session missing, attempting auto-login...`);
     const onLoginPage = (page.url() || '').toLowerCase().includes('login');
     if (!onLoginPage) {
       await page.goto('https://www.linkedin.com/login', { waitUntil: 'domcontentloaded' });
     }
     if (await detectTwoFactorBlock(page, email)) return false;
+
+    // No saved credentials — a brand-new account being onboarded (e.g. via
+    // `save-li-session <new-nickname>`), not a broken existing one. Skip
+    // straight to manual login with a real amount of time to actually type
+    // credentials and clear a checkpoint, instead of the short post-auto-
+    // login-attempt fallback below (30s — meant to catch a slow render on an
+    // auto-fill that already ran, not to onboard someone from scratch).
+    if (!email || !password) {
+      console.log(`   ⚠️  No saved credentials for this account — waiting for manual login (${ONBOARDING_LOGIN_TIMEOUT_MS / 1000}s)...`);
+      try {
+        await page.locator('a[href*="/mynetwork/"]').first().waitFor({ state: 'visible', timeout: ONBOARDING_LOGIN_TIMEOUT_MS });
+        console.log('   ✅ Manual login detected');
+        return true;
+      } catch {
+        console.error(`   ❌ Manual login not detected within ${ONBOARDING_LOGIN_TIMEOUT_MS / 1000}s`);
+        return false;
+      }
+    }
+
+    // ── Auto-login attempt ──────────────────────────────────────────────────
+    console.log(`   🔐 ${email}: session missing, attempting auto-login...`);
 
     const userField = page.locator('input#username, input[name="session_key"]');
     if (await userField.isVisible().catch(() => false)) {
@@ -171,15 +190,28 @@ export async function loginToLinkedIn(options?: {
   password?: string;
   nickname?: string;
 }): Promise<Page> {
+  // No "fall back to any active account" here when a nickname was explicitly
+  // given — that exact bug (silently substituting the wrong account/session
+  // for an unmatched nickname, confirmed live 2026-09-25: "saksham" opened
+  // vansh's session/credentials) was fixed on Instagram's login.ts earlier
+  // and deliberately avoided on every platform added since; this one had
+  // drifted out of sync. A nickname with no matching account entry means a
+  // brand-new account being onboarded, not "pick anyone" — leave it
+  // unresolved so its own fresh session dir gets created below instead.
   const account = options?.nickname
-    ? getLinkedInAccountByNickname(options.nickname) ?? getActiveLinkedInAccount()
+    ? getLinkedInAccountByNickname(options.nickname)
     : getActiveLinkedInAccount();
 
-  const email    = options?.email    || account?.email    || process.env.LINKEDIN_EMAIL!;
-  const password = options?.password || account?.password || process.env.LINKEDIN_PASSWORD!;
+  const email    = options?.email    || account?.email    || process.env.LINKEDIN_EMAIL;
+  const password = options?.password || account?.password || process.env.LINKEDIN_PASSWORD;
 
   const chromePath = fs.existsSync(CHROME_PATH) ? CHROME_PATH : chromium.executablePath();
-  const sessionDir = account?.sessionDir ? path.resolve(account.sessionDir) : sessionDirFor(email);
+  // A brand-new nickname (no account entry yet) has no email to key a
+  // session dir off — use the nickname itself so it gets its own fresh,
+  // stable session folder instead of colliding with someone else's.
+  const sessionDir = account?.sessionDir
+    ? path.resolve(account.sessionDir)
+    : sessionDirFor(options?.nickname || email || 'default');
   currentSessionDir = sessionDir;
   fs.mkdirSync(sessionDir, { recursive: true });
   await killChromeForProfile(sessionDir);

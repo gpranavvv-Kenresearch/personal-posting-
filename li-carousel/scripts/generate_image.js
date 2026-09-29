@@ -6,9 +6,12 @@
 //
 // Output: ./images/image_[YYYY-MM-DD]_[slug].png
 //
-// Login: if the ChatGPT session in `.auth/chatgpt-profile/` is not active,
-// the script will wait up to 5 minutes for Namit to log in manually in the
-// Chrome window it opens. No separate auth step required.
+// Login: uses the already-logged-in "carousel-single" ChatGPT account
+// (its own dedicated session, separate from blog-gen/blog-image/storyline)
+// at ../.sessions/chatgpt-accounts/carousel-single — the same session-dir
+// convention the rest of the project uses. If that session is not active,
+// the script will wait up to 5 minutes for manual login in the Chrome
+// window it opens. Override with CHATGPT_PROFILE_DIR if needed.
 
 import { chromium } from 'playwright';
 import path from 'node:path';
@@ -18,7 +21,7 @@ import { pasteIntoChatGPTComposer } from './chatgpt_composer.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
-const PROFILE_DIR = process.env.CHATGPT_PROFILE_DIR || path.join(ROOT, '.auth', 'chatgpt-profile');
+const PROFILE_DIR = process.env.CHATGPT_PROFILE_DIR || path.join(ROOT, '..', '.sessions', 'chatgpt-accounts', 'carousel-single');
 const IMAGES_DIR = path.join(ROOT, 'images');
 const CHATGPT_URL = 'https://chatgpt.com/images';
 
@@ -110,60 +113,31 @@ try {
   await page.goto(CHATGPT_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
   await page.waitForTimeout(3000);
 
-  // ---------- Login check ----------
-  const isLoggedIn = async () => {
-    try {
-      const loginBtn = page.locator('button:has-text("Log in"), a:has-text("Log in")');
-      if (await loginBtn.isVisible({ timeout: 1000 }).catch(() => false)) return false;
-
-      const loggedInSelectors = [
-        'a:has-text("New chat")',
-        'nav:has-text("New chat")',
-        'span:has-text("New chat")',
-        '[href="/new"]',
-        'button:has-text("New chat")',
-      ];
-      for (const sel of loggedInSelectors) {
-        if (await page.locator(sel).first().isVisible({ timeout: 1000 }).catch(() => false)) {
-          return true;
-        }
-      }
-    } catch {}
-    return false;
-  };
-
-  if (await isLoggedIn()) {
-    console.log('Already logged in.');
-  } else {
-    console.log('Not logged in. Please log in to ChatGPT in the Chrome window. Waiting up to 5 minutes...');
-    const loginDeadline = Date.now() + 5 * 60 * 1000;
-    let loggedIn = false;
-    while (Date.now() < loginDeadline) {
-      await page.waitForTimeout(3000);
-      if (await isLoggedIn()) {
-        console.log('Logged in successfully.');
-        await page.waitForTimeout(2000);
-        loggedIn = true;
-        break;
-      }
-      const remaining = Math.round((loginDeadline - Date.now()) / 1000);
-      console.log(`Waiting for login... ${remaining}s remaining`);
-    }
-    if (!loggedIn) throw new Error('Login timeout. Please log in within 5 minutes.');
-  }
+  // Login-check/wait loop removed — this account (carousel-single) is
+  // already logged in, and the check itself was flaky (1s-timeout
+  // visibility probes on a page that can take longer than that to render),
+  // producing an incorrect "Not logged in" on some runs and burning up to
+  // 5 minutes waiting for a login that already happened. Go straight to
+  // the actual work: paste, send, record.
 
   // ---------- Dismiss any blocking modals ----------
-  const modalSel = '[data-testid=”modal-conversation-history-rate-limit”], [id=”modal-conversation-history-rate-limit”]';
+  // Same smart-quote bug as the close-button selectors below — this used
+  // ” instead of " and so NEVER matched anything, meaning modalVisible was
+  // always false and this whole dismissal block never ran at all.
+  const modalSel = '[data-testid="modal-conversation-history-rate-limit"], [id="modal-conversation-history-rate-limit"]';
   const modalVisible = await page.locator(modalSel).isVisible({ timeout: 2000 }).catch(() => false);
   if (modalVisible) {
     console.log('Rate-limit modal detected — dismissing...');
-    // Try close/OK buttons inside the modal
+    // Try close/OK buttons inside the modal. (These used typographic smart
+    // quotes — ”/“ instead of " — inside the selector strings before,
+    // which made every one of them syntactically invalid and silently
+    // never-matching. "Got it" and the others never actually got clicked.)
     const closeBtns = [
       `${modalSel} button`,
-      'button[aria-label=”Close”]',
-      'button:has-text(“OK”)',
-      'button:has-text(“Got it”)',
-      'button:has-text(“Continue”)',
+      'button[aria-label="Close"]',
+      'button:has-text("Got it")',
+      'button:has-text("OK")',
+      'button:has-text("Continue")',
     ];
     let dismissed = false;
     for (const sel of closeBtns) {
@@ -171,7 +145,7 @@ try {
       if (await btn.isVisible({ timeout: 1000 }).catch(() => false)) {
         await btn.click().catch(() => {});
         dismissed = true;
-        console.log(`Dismissed via “${sel}”`);
+        console.log(`Dismissed via "${sel}"`);
         break;
       }
     }
@@ -182,6 +156,19 @@ try {
       await page.waitForTimeout(3000);
     }
     await page.waitForTimeout(2000);
+  }
+
+  // Page-wide fallback, not scoped to the modal container above: ChatGPT's
+  // "Too many requests" rate-limit popup doesn't always carry the same
+  // data-testid/id as the named modal — its "Got it" button can just be
+  // sitting anywhere in the DOM. Click it wherever it is.
+  {
+    const gotIt = page.getByRole('button', { name: 'Got it', exact: true }).first();
+    if (await gotIt.isVisible({ timeout: 1000 }).catch(() => false)) {
+      await gotIt.click().catch(() => {});
+      console.log('Dismissed "Got it" popup (page-wide fallback)');
+      await page.waitForTimeout(500);
+    }
   }
 
   // ---------- Submit prompt ----------
@@ -264,9 +251,13 @@ try {
 } catch (err) {
   console.error(`Error: ${err.message}`);
   try {
-    const debugPath = path.join(IMAGES_DIR, `error_${slug}_${Date.now()}.png`);
+    const stamp = Date.now();
+    const debugPath = path.join(IMAGES_DIR, `error_${slug}_${stamp}.png`);
     await page.screenshot({ path: debugPath, fullPage: true });
     console.log(`Debug screenshot: ${debugPath}`);
+    const htmlPath = path.join(IMAGES_DIR, `error_${slug}_${stamp}.html`);
+    fs.writeFileSync(htmlPath, await page.content(), 'utf8');
+    console.log(`Debug HTML: ${htmlPath}`);
   } catch {}
   console.log(JSON.stringify({ status: 'error', message: err.message }));
   process.exit(1);
