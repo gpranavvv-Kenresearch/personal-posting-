@@ -28,6 +28,8 @@ import { normalizeImgTags } from '../agents/blogSanityAgent.js';
 import { generateAndUploadSnapshotImage } from '../agents/blogSnapshotImageAgent.js';
 import { generateAndUploadLandscapeImage } from '../agents/blogLandscapeImageAgent.js';
 import { applyPreferredSourceCTA, validatePreferredSourceCTA, PreferredSourceMode } from '../agents/blogPreferredSourceAgent.js';
+import { registerAutomation, startRun, finishRun } from '../dashboard/client.js';
+import { AUTOMATION_CONFIG } from '../dashboard/config.js';
 import { getContentPoolRowsNeedingGeneration, saveGeneratedBlogToPool, saveCoverImageUrlToPool, saveNewLogicImageText, getSheetRowByIndex } from '../sheets/sheets.js';
 
 // 'tracked' by default — lets us start collecting Preferred Source CTA Click
@@ -130,12 +132,19 @@ export interface BlogGenBatchOptions {
 
 /** One pass: generate up to `limit` pending Content Pool rows, verifying each write before moving on. */
 export async function runBlogGenBatch(opts: BlogGenBatchOptions = {}): Promise<{ attempted: number; generated: number; failed: number }> {
+  // Dashboard reporting — best-effort, never blocks or fails this batch (see
+  // dashboard/client.ts doc comment). Registration is cheap/idempotent, so
+  // it's fine to call on every batch rather than once at process start.
+  await registerAutomation(AUTOMATION_CONFIG);
+  const dashboardRunId = await startRun(AUTOMATION_CONFIG.automationId, { workerId: process.env.COMPUTERNAME || process.env.HOSTNAME, currentStage: 'blog_generation' });
+
   const limit = opts.limit ?? 3;
   const retryOnVerifyFail = opts.retryOnVerifyFail ?? true;
   const rows = await getContentPoolRowsNeedingGeneration(limit, 'newLogic');
 
   if (rows.length === 0) {
     console.log('[BLOG GEN] No New Logic rows need generation (Target URL set + Blog Content empty).');
+    await finishRun(dashboardRunId, { status: 'SUCCESS', executionQuality: 'NO_EXECUTION', metrics: { blogs_attempted: 0, blogs_generated: 0, blogs_failed: 0 } });
     return { attempted: 0, generated: 0, failed: 0 };
   }
 
@@ -350,6 +359,11 @@ export async function runBlogGenBatch(opts: BlogGenBatchOptions = {}): Promise<{
   }
 
   console.log(`\n[BLOG GEN] Pass complete: ${generated} generated, ${failed} failed, out of ${rows.length}.`);
+  await finishRun(dashboardRunId, {
+    status: generated > 0 ? (failed > 0 ? 'WARNING' : 'SUCCESS') : 'FAILED',
+    executionQuality: generated > 0 ? 'REAL_EXECUTION' : 'NO_EXECUTION',
+    metrics: { blogs_attempted: rows.length, blogs_generated: generated, blogs_failed: failed },
+  });
   return { attempted: rows.length, generated, failed };
 }
 
