@@ -17,7 +17,7 @@ export const memoryFile = path.join(dataDir, 'memory.json');
 const localConfigFile = path.join(employeeRoot, 'config.json');
 let localConfig = {};
 try {
-  localConfig = JSON.parse(fs.readFileSync(localConfigFile, 'utf8'));
+  localConfig = JSON.parse(fs.readFileSync(localConfigFile, 'utf8').replace(/^\uFEFF/, ''));
 } catch {
   // setup.mjs creates this private file. Environment variables remain valid fallbacks.
 }

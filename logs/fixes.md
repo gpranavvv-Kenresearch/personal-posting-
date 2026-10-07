@@ -1,5 +1,11 @@
 # Fix log
 
+## 2026-10-07 - Tailscale host config silently fell back to localhost
+
+- Cause: Windows PowerShell 5.1 wrote `ai-employee/config.json` with a UTF-8 BOM. The Node config loader could not parse it, swallowed the parse error, and fell back to `127.0.0.1`; the existing local server then caused `EADDRINUSE` and Scheduled Task result `1`.
+- Fix: The config loader now strips an optional BOM, and the Tailscale configuration script writes UTF-8 without a BOM.
+- Verification: The repaired private config loads `100.96.52.13`, PowerShell parsing passes, and the AI Guardian unit suite passes.
+
 ## 2026-10-07 - Tailscale control setup selected only the first path character
 
 - Cause: PowerShell unwrapped the single executable candidate into a scalar string, so `$candidates[0]` returned `C` instead of the full Tailscale executable path.

@@ -18,7 +18,9 @@ if (-not $ip) {
 $configPath = (Resolve-Path (Join-Path $PSScriptRoot '..\config.json')).Path
 $config = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
 $config.host = $ip
-$config | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $configPath -Encoding utf8
+$json = $config | ConvertTo-Json -Depth 10
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+[System.IO.File]::WriteAllText($configPath, $json, $utf8NoBom)
 
 Write-Host "Control center configured for http://${ip}:3210"
 Write-Host 'Restart the Ken Research AI Employee scheduled task or sign out and in.'
