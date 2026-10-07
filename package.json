@@ -29,7 +29,15 @@
     "newsletter:batch": "node --import=tsx -e \"import('./src/newsletter-outlook/runNewsletterBatch.ts').then(m=>m.runNewsletterBatch())\"",
     "newsletter:campaign:generate": "node --import=tsx -e \"import('./src/newsletter-outlook/runNewsletterCampaignBatch.ts').then(m=>m.generateStep())\"",
     "newsletter:campaign:send": "node --import=tsx -e \"import('./src/newsletter-outlook/runNewsletterCampaignBatch.ts').then(m=>m.sendStep())\"",
-    "login:chatgpt:newsletter": "node --import=tsx src/tools/loginChatGpt.ts newsletter"
+    "login:chatgpt:newsletter": "node --import=tsx src/tools/loginChatGpt.ts newsletter",
+    "employee:setup": "node ai-employee/setup.mjs",
+    "employee:index": "node ai-employee/ingest.mjs",
+    "employee:start": "node ai-employee/server.mjs",
+    "employee:test": "node --test --test-isolation=none ai-employee/test/*.test.mjs",
+    "employee:observe": "node ai-employee/observer.mjs --once",
+    "employee:observe:daemon": "node ai-employee/observer.mjs",
+    "employee:context": "node ai-employee/context-pack.mjs",
+    "employee:eval": "node ai-employee/eval.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",

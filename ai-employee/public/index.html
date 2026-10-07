@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Ken Research AI Employee</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header>
+    <div>
+      <h1>Ken Research AI Employee</h1>
+      <p>Local project companion</p>
+    </div>
+    <div class="mode"><span></span> Observe mode</div>
+  </header>
+  <main>
+    <aside>
+      <section>
+        <h2>Runtime</h2>
+        <dl id="status"><dt>Status</dt><dd>Checking...</dd></dl>
+        <button id="reindex" type="button">Rebuild knowledge index</button>
+      </section>
+      <section>
+        <h2>Boundaries</h2>
+        <p>Can inspect code, documentation, imported conversations, approved logs, and safe runtime metadata.</p>
+        <p>Cannot post, send, edit, delete, restart, or access credentials.</p>
+      </section>
+      <section>
+        <h2>Open Incidents</h2>
+        <div id="incidents" class="incident-list"><p>Loading...</p></div>
+      </section>
+      <section>
+        <h2>Pending Memory</h2>
+        <div id="memory" class="memory-list"><p>Loading...</p></div>
+      </section>
+    </aside>
+    <section class="workspace">
+      <div id="messages" aria-live="polite">
+        <article class="assistant">
+          <div class="label">AI employee</div>
+          <p>Ask me how a platform works, trace a data flow, inspect an error, or propose a recovery plan.</p>
+        </article>
+      </div>
+      <form id="chat-form">
+        <textarea id="message" rows="3" placeholder="Ask about the project..." required></textarea>
+        <button type="submit" aria-label="Send">Send</button>
+      </form>
+    </section>
+  </main>
+  <script type="module" src="app.js"></script>
+</body>
+</html>

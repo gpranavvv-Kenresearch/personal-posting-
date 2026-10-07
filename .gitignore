@@ -1,6 +1,11 @@
 node_modules/
 .env
 .sessions/
+ai-employee/data/
+ai-employee/imports/
+ai-employee/config.json
+ai-employee/observer.config.json
+ai-employee/observer-data/
 li-sessions/
 .accounts/
 dist/

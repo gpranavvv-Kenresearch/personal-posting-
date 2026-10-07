@@ -1,0 +1,9 @@
+{
+  "controlUrl": "http://100.x.y.z:3210",
+  "sharedSecret": "copy observerSecret from the control laptop's ignored ai-employee/config.json",
+  "sourceName": "posting-laptop",
+  "pollSeconds": 60,
+  "sheetReporting": true,
+  "spreadsheetId": "1p_N3zzJbUx-7t8sjuAtbQsHaUfVmYxytQU_gDd2MGwQ",
+  "sheetTab": "AI Guardian"
+}

@@ -1,5 +1,39 @@
 # Fix log
 
+## 2026-10-07 - AI Employee POC test runner blocked by child-process sandboxing
+
+- Cause: Node's default `--test` isolation starts a child process for each test file. The managed workspace denied that spawn with `EPERM`, before any test code executed.
+- Fix: Changed `employee:test` to use Node 24's `--test-isolation=none` option so the small, trusted POC test suite runs in the current process.
+- Verification: All 5 POC tests pass. Syntax checks pass, the knowledge index builds 270 documents / 1,791 chunks without Ollama, the local dashboard returns HTTP 200, and retrieval ranks `src/batchLedger.ts` first for a duplicate-slot question.
+
+## 2026-10-07 - AI Guardian Level 1 setup
+
+- Cause: The repository had a local chat POC but no two-laptop observer, incident store, deterministic owner-policy checks, memory approval states, or authenticated evidence intake.
+- Fix: Added the read-only observer, durable queues, authenticated control-center API, advisory incident diagnosis, private memory review, semantic indexing, dedicated `AI Guardian` Sheet reporter, evaluation cases, and Windows startup-task installers.
+- Guardrail: No posting, retry, restart, session, code-edit, credential, or operational-Sheet tool is exposed to the model.
+- Verification: Node syntax checks pass; guardian unit tests pass; HTTP authentication returns 401 for an invalid observer and 202 for the private observer secret.
+
+## 2026-10-07 - Ollama and Windows task setup recovery
+
+- Cause: WinGet's Delivery Optimization download timed out, and the sandboxed Task Scheduler API returned access denied.
+- Fix: Ollama completed through WinGet's fallback transport; the redundant direct download was cancelled and removed. The control-center startup task was registered with the required elevated permission.
+- Verification: Ollama API reports version 0.40.0; `nomic-embed-text` installed successfully; the scheduled task registration completed.
+
+## 2026-10-07 - Tailscale installation blocked by Windows elevation
+
+- Cause: WinGet returned installer code 1602, and the directly logged MSI returned 1603 with the launch condition: `This package requires elevated privileges to install.` The managed execution permission did not provide a true Administrator token to Windows Installer.
+- Attempts: WinGet package install, direct quiet MSI, and a logged wait-for-exit MSI run. No product or service was left installed.
+- Resolution: Stopped after three approaches. Added `configure-tailscale-control.ps1` so setup can resume immediately after the owner installs Tailscale as Administrator and signs in on both laptops.
+
+## 2026-10-07 - Qwen3 default thinking exceeded local response budget
+
+- Cause: The first `qwen3:8b` repository evaluation did not finish its first case within the five-minute Ollama request timeout on this 16 GB laptop.
+- Fix: Disabled Qwen's optional thinking stream for this operational assistant, capped output at 900 tokens, and set an 8,192-token context window. The evaluation runner now records per-case latency and continues after individual failures.
+- Follow-up: The full agent still exceeded the practical budget through repeated tool-call turns, so Level 1 now permits one read-only follow-up round and caps the final response at 450 tokens.
+- Evaluation controller fix: Two cases returned no text because the model requested another tool on its last allowed round. The final round now exposes no tools, forcing a report from the evidence already gathered.
+- Hardware-fit decision: `qwen3:8b` still timed out on the daily-total case and `qwen3:4b` remained slow with the same 8K/tool configuration. The default fast path now uses `qwen3:4b`, five retrieved chunks, a 4,096-token context, a 300-token answer, and zero extra tool rounds. Optional deep mode can raise `AI_EMPLOYEE_MAX_TOOL_ROUNDS` and select the 8B model explicitly.
+- Final verification: The focused `qwen3:4b` setup passed 4/4 cases: repeated access restriction, missing heartbeat, total below 500, and prohibited mutation refusal. Measured latency was 106-146 seconds per diagnosis.
+
 ## 2026-08-11 — Remove hashtags from Tumblr content
 
 - Cause: The Tumblr generation prompt explicitly required 2–3 hashtags, and captions already stored in Google Sheets bypassed generation unchanged.
