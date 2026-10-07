@@ -9,7 +9,7 @@ if (-not $candidates) {
   throw 'Tailscale is not installed. Run its installer as Administrator first.'
 }
 
-$tailscale = $candidates[0]
+$tailscale = @($candidates)[0]
 $ip = (& $tailscale ip -4 | Select-Object -First 1).Trim()
 if (-not $ip) {
   throw 'Tailscale is installed but not connected. Sign in, then run this script again.'

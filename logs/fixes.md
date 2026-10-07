@@ -1,5 +1,11 @@
 # Fix log
 
+## 2026-10-07 - Tailscale control setup selected only the first path character
+
+- Cause: PowerShell unwrapped the single executable candidate into a scalar string, so `$candidates[0]` returned `C` instead of the full Tailscale executable path.
+- Fix: Explicitly wrap the filtered candidates as an array before selecting the first entry.
+- Verification: PowerShell parsing and the AI Guardian unit suite pass; the owner can rerun the elevated configuration command to complete the live Tailscale binding.
+
 ## 2026-10-07 - AI Employee POC test runner blocked by child-process sandboxing
 
 - Cause: Node's default `--test` isolation starts a child process for each test file. The managed workspace denied that spawn with `EPERM`, before any test code executed.
