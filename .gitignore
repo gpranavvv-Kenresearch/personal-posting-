@@ -42,7 +42,24 @@ li-carousel-storyline/images/
 li-carousel-storyline/runs/
 
 # Not part of this project's source — a standalone keep-awake helper script.
-scripts/
+# Leading slash is REQUIRED: a bare "scripts/" also matches src/scripts/, which
+# would silently leave new files there untracked.
+/scripts/
 
 __pycache__/
 *.pyc
+
+# ── Milestone 0 safety harness ──────────────────────────────────────────────
+# Any .env variant is secret; the committed template is the one exception, so
+# the negation must come AFTER the .env.* rule.
+.env.*
+!.env.example
+# Runtime-state backups, the restore tool's pre-restore snapshots, and the
+# future (Milestone 3) database directory.
+backups/
+.pre-restore/
+data/
+# Generated dashboard output — contains report URLs/lead counts, regenerate anytime.
+dashboard/
+# The development sandbox holds dev sessions, logs and accounts.
+dev-sandbox/

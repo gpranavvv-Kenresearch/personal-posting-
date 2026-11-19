@@ -186,6 +186,19 @@ export async function startCoordinatorDaemon(): Promise<void> {
   // then generates blog content for whatever just landed in New Logic.
   cron.schedule('30 18 * * *', wrap('Nightly RSS Feed', runNightlyRssFeed), { timezone: tz });
 
+  // ── Intelligence cycle: 19:30 IST, after the day's posting and the 18:30 ──
+  // nightly feed, so it never competes with a posting slot for the browser or
+  // the API quotas.
+  //
+  // This is ADDITIVE and inert by default: runIntelligenceCycle() returns
+  // immediately unless FEATURE_INTELLIGENCE is set, without opening a database
+  // or making a network call. It never throws, never posts, and never changes
+  // the schedule — a failure inside it cannot affect posting.
+  cron.schedule('30 19 * * *', wrap('Intelligence Cycle', async () => {
+    const { runIntelligenceCycle, formatCycleResult } = await import('./intelligence/runCycle.js');
+    console.log(formatCycleResult(await runIntelligenceCycle()));
+  }), { timezone: tz });
+
   // ── Weekly SERP recheck: Saturday 10 PM IST ───────────────────────────────
   cron.schedule('0 22 * * 6', wrap('Weekly SERP Recheck', runWeeklySerpRecheck), { timezone: tz });
 

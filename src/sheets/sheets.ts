@@ -9,6 +9,8 @@
 
 import { google } from 'googleapis';
 import 'dotenv/config';
+import { MAIN_SHEET_ID } from '../config/sheetIds.js';
+import { guardSheetsClient } from '../config/tabGuard.js';
 
 // ──── History-safe helpers ──────────────────────────────────────────────────
 
@@ -29,33 +31,33 @@ function latestDate(value: string): string {
 }
 
 // Sheet configuration for different platform types
-const SOCIAL_SHEET_ID = '1p_N3zzJbUx-7t8sjuAtbQsHaUfVmYxytQU_gDd2MGwQ'; // X, FB, LI
+const SOCIAL_SHEET_ID = MAIN_SHEET_ID; // X, FB, LI
 const SOCIAL_SHEET_NAME = 'Social Media';
 
-const BLOG_SHEET_ID = '1p_N3zzJbUx-7t8sjuAtbQsHaUfVmYxytQU_gDd2MGwQ'; // Medium, Dev.to, Google Sites, Linkmate, LinkedIn Pulse
+const BLOG_SHEET_ID = MAIN_SHEET_ID; // Medium, Dev.to, Google Sites, Linkmate, LinkedIn Pulse
 const BLOG_SHEET_NAME = 'Blogs';
 
-const ALGO_SHEET_ID = '1p_N3zzJbUx-7t8sjuAtbQsHaUfVmYxytQU_gDd2MGwQ'; // Algo Reports tab
+const ALGO_SHEET_ID = MAIN_SHEET_ID; // Algo Reports tab
 const ALGO_SHEET_NAME = 'Algo Reports';
 
-const CONTENT_POOL_SHEET_ID = '1p_N3zzJbUx-7t8sjuAtbQsHaUfVmYxytQU_gDd2MGwQ'; // Content Pool tab (group-batch source)
+const CONTENT_POOL_SHEET_ID = MAIN_SHEET_ID; // Content Pool tab (group-batch source)
 const CONTENT_POOL_SHEET_NAME = 'Content Pool';
 
-const NEW_LOGIC_SHEET_ID = '1p_N3zzJbUx-7t8sjuAtbQsHaUfVmYxytQU_gDd2MGwQ'; // New Logic tab — 3-slot independent posting (Linkmate/Calisthenics/HackMD/Blogger/Notion/Dev.to/Coda/LinkedIn Pulse/WordPress)
+const NEW_LOGIC_SHEET_ID = MAIN_SHEET_ID; // New Logic tab — 3-slot independent posting (Linkmate/Calisthenics/HackMD/Blogger/Notion/Dev.to/Coda/LinkedIn Pulse/WordPress)
 const NEW_LOGIC_SHEET_NAME = 'New Logic';
 
 // RSS Extraction tab — raw landing zone for every item the Tech Team RSS feed
 // reports. Nothing reads from this tab automatically yet; it exists so the
 // full raw feed is captured, with the Social Media / New Logic feed-in logic
 // to be built against it later (see PRD_RSS_Content_Distribution.md).
-const RSS_EXTRACTION_SHEET_ID = '1p_N3zzJbUx-7t8sjuAtbQsHaUfVmYxytQU_gDd2MGwQ';
+const RSS_EXTRACTION_SHEET_ID = MAIN_SHEET_ID;
 const RSS_EXTRACTION_SHEET_NAME = 'RSS Extraction';
 
 // Newsletter campaign tab — manual input (3-4 report URLs + prospect emails
 // per row), content generated via ChatGPT, sent via Outlook. Separate from
 // the New Logic-reuse newsletter path in the "New Logic (Outlook)" section
 // further down, which sends already-generated blog content instead.
-const NEWSLETTER_CAMPAIGN_SHEET_ID = '1p_N3zzJbUx-7t8sjuAtbQsHaUfVmYxytQU_gDd2MGwQ';
+const NEWSLETTER_CAMPAIGN_SHEET_ID = MAIN_SHEET_ID;
 const NEWSLETTER_CAMPAIGN_SHEET_NAME = 'Newsletter';
 
 // Helper to get sheet config based on platform
@@ -371,7 +373,7 @@ async function getSheetsClient() {
     scopes: ['https://www.googleapis.com/auth/spreadsheets'],
   });
 
-  return google.sheets({ version: 'v4', auth });
+  return guardSheetsClient(google.sheets({ version: 'v4', auth }));
 }
 
 // ──── Column map (0-indexed, header-row-driven) ──────────────────────────

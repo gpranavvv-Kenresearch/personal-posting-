@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import { google } from 'googleapis';
+import { guardSheetsClient } from '../config/tabGuard.js';
 
 const sheetId = process.argv[2];
 if (!sheetId) {
@@ -12,7 +13,7 @@ if (!sheetId) {
     keyFile: '.accounts/google-service-account.json',
     scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
   });
-  const sheets = google.sheets({ version: 'v4', auth: await auth.getClient() as any });
+  const sheets = guardSheetsClient(google.sheets({ version: 'v4', auth: await auth.getClient() as any }));
   const meta = await sheets.spreadsheets.get({
     spreadsheetId: sheetId,
     fields: 'properties(title),sheets(properties(title,sheetId,gridProperties))',

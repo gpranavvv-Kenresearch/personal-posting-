@@ -4,6 +4,6 @@
   "sourceName": "posting-laptop",
   "pollSeconds": 60,
   "sheetReporting": true,
-  "spreadsheetId": "1p_N3zzJbUx-7t8sjuAtbQsHaUfVmYxytQU_gDd2MGwQ",
+  "spreadsheetId": "YOUR_DEVELOPMENT_SPREADSHEET_ID_HERE",
   "sheetTab": "AI Guardian"
 }

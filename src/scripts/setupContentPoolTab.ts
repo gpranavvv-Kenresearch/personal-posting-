@@ -12,8 +12,10 @@
 
 import 'dotenv/config';
 import { google } from 'googleapis';
+import { MAIN_SHEET_ID } from '../config/sheetIds.js';
+import { guardSheetsClient } from '../config/tabGuard.js';
 
-const SPREADSHEET_ID = '1p_N3zzJbUx-7t8sjuAtbQsHaUfVmYxytQU_gDd2MGwQ';
+const SPREADSHEET_ID = MAIN_SHEET_ID;
 const SHEET_NAME = 'Content Pool';
 
 const HEADERS = [
@@ -59,7 +61,7 @@ async function main() {
     credentials,
     scopes: ['https://www.googleapis.com/auth/spreadsheets'],
   });
-  const sheets = google.sheets({ version: 'v4', auth });
+  const sheets = guardSheetsClient(google.sheets({ version: 'v4', auth }));
 
   const meta = await sheets.spreadsheets.get({ spreadsheetId: SPREADSHEET_ID });
   const existing = meta.data.sheets?.find(s => s.properties?.title === SHEET_NAME);

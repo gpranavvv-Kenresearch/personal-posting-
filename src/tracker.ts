@@ -9,10 +9,12 @@
 
 import { google } from 'googleapis';
 import 'dotenv/config';
+import { MAIN_SHEET_ID } from './config/sheetIds.js';
+import { guardSheetsClient } from './config/tabGuard.js';
 
 // ──── Sheet config ────────────────────────────────────────────────────────
 
-const SHEET_ID = '1p_N3zzJbUx-7t8sjuAtbQsHaUfVmYxytQU_gDd2MGwQ';
+const SHEET_ID = MAIN_SHEET_ID;
 
 const SHEETS = [
   { name: 'Social Media', type: 'social' as const },
@@ -56,7 +58,7 @@ async function getSheetsClient() {
     credentials,
     scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
   });
-  return google.sheets({ version: 'v4', auth });
+  return guardSheetsClient(google.sheets({ version: 'v4', auth }));
 }
 
 // ──── Column resolver ─────────────────────────────────────────────────────

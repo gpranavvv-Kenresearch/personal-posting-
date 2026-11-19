@@ -3,6 +3,12 @@
   "version": "0.2.0",
   "type": "module",
   "scripts": {
+    "test": "node --import=tsx --test tests/unit/*.test.ts",
+    "test:watch": "node --import=tsx --test --watch tests/unit/*.test.ts",
+    "intel": "node --import=tsx src/intelligence/cli.ts",
+    "dev:sandbox": "node src/tools/devRun.mjs",
+    "state:backup": "node --import=tsx src/tools/backupState.ts",
+    "state:restore": "node --import=tsx src/tools/restoreState.ts",
     "dev": "node --import=tsx src/index.ts",
     "dev:supervised": "node --import=tsx src/supervisor.ts",
     "ledger:seed": "node --import=tsx src/tools/ledgerSeed.ts",
